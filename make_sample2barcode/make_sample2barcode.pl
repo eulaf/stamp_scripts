@@ -40,15 +40,14 @@ Convert a Excel sample key to a STAMP sample2barcode.txt file.
 
 The input file must be an Excel file with the name of the stamp run
 in the format STAMP# (case-insensitive) somewhere in the file and
-a table with columns: Name, lab#, mrn# and barcode (case-insensitive).
-The first data row in the table should be the control, which has no
-lab# or mrn.
+a table with columns: Name, lab# or acc#, mrn# and barcode (case-insensitive).
+The control has no lab# or mrn#.
 
 =head2 Output
 
 The output is a tab-delimited sample2barcode_STAMP###.txt file for use 
 with the STAMP analysis pipeline.  The output file will be written in
-the same folder that the program was launched from.
+the same folder as the input file.
 
 =head1 OPTIONS
 
@@ -179,8 +178,13 @@ sub create_message_string {
 
     my ($runnum, $data) = get_sample_data($inputfile);
     my $contents = create_sample2barcode($runnum, $data);
-#    my ($basename, $outpath) = fileparse($inputfile, '.xlsx', '.xls');
-    my $outfile = "sample2barcode_STAMP$runnum.txt";
+    # If script is run from the K drive, then save data to
+    # same directory as script; otherwise, save to same directory
+    # as input file.
+    my ($basename, $outpath) = fileparse($inputfile);
+    if ($0 =~ /^K/) { ($basename, $outpath) = fileparse($0); }
+    my $outfile = File::Spec->catfile($outpath, 
+                  "sample2barcode_STAMP$runnum.txt");
     print STDERR "\nOutput file: $outfile\n";
     open(my $ofh, ">", $outfile) or die ">$outfile: $!";
     print $ofh $contents;
@@ -192,8 +196,11 @@ sub get_sample_data {
     my $inputfile = shift;
 
     print "Reading $inputfile\n";
+    unless ($inputfile =~ /\.xls/) {
+        die "ERROR: Input $inputfile not an Excel file\n";
+    }
     my $wkbook = ReadData($inputfile) or
-        croak "Failed to read $inputfile: $!\n";
+        die "Failed to read $inputfile: $!\n";
     my @cells = grep @$_, @{ $$wkbook[1]{cell} }; 
     my %columns = (
             NAME => -1,
@@ -208,13 +215,13 @@ sub get_sample_data {
     for(my $i=0; $i<@cells; $i++) {
         my @columnvals = map { defined $_ ? $_ : '' } @{ $cells[$i] };
         # Find stamp run
-        if (my @runnum = grep(/stamp\s*\d+/i, @columnvals)) {
+        if (my @runnum = grep(/^stamp\s*\d+/i, @columnvals)) {
             $runnum[0] =~ s/stamp\s*(\d+)/$1/i;
             $runnum = sprintf "%03d", $runnum[0];
         }
         if (grep(/name/i, @columnvals)) {
             $data{name} = get_column_values('name', \@columnvals);
-        } elsif (grep(/lab#/i, @columnvals)) {
+        } elsif (grep(/lab#|acc#/i, @columnvals)) {
             $data{lab} = get_column_values('lab#', \@columnvals);
         } elsif (grep(/mrn#/i, @columnvals)) {
             $data{mrn} = get_column_values('mrn#', \@columnvals);
@@ -237,9 +244,11 @@ sub get_column_values {
 
     my $flag = 0;
     my %values;
+    # Get values in column after field
     for(my $j=0; $j<@$columnvals; $j++) {
         if ($flag && $$columnvals[$j]) {
             $values{$j} = $$columnvals[$j];
+            $values{$j} =~ s/^\s+|\s+$//;
         } elsif ($$columnvals[$j] =~ /$field/i) {
             $flag = 1;
         }
@@ -253,16 +262,8 @@ sub create_sample2barcode {
     my $data = shift;
 
     my $contents = '';
-    # control is special case w/o lab# or MRN
     my @i = sort {$a<=>$b} keys %{ $$data{name} };
-    my $i_control = shift @i;
-    my ($control) = split(/\s+/, $$data{name}{$i_control});
-    $control .= "_".$runnum;
-    my $control_barcode = $$data{barcode}{$i_control};
-    unless ($control_barcode) { die "No control barcode\n"; }
-    $contents .= "$control\t$control_barcode\n";
 
-    # patient cases
     foreach my $i (@i) {
         # Change name to last name + first initial(s)
         my $name = $$data{name}{$i};
@@ -271,7 +272,9 @@ sub create_sample2barcode {
         print STDERR "$$data{name}{$i} --> $name\n";
         my $lab = $$data{lab}{$i} || '';
         my $mrn = $$data{mrn}{$i} || '';
-        my $sample = join("_", $name, $lab, $mrn);
+        # control is special case w/o lab# or MRN
+        my $sample = $lab || $mrn ?  join("_", $name, $lab, $mrn) : 
+                     $name . '_'.$runnum;
         my $barcode = $$data{barcode}{$i};
         unless ($barcode) {
             print STDERR "No barcode for '$name'; SKIPPING\n";
