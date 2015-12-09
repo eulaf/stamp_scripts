@@ -63,8 +63,8 @@ Print short usage message.
 
 ### CONSTANTS
 
-my $VERSION = "0.1";
-my $BUILD = "150326";
+my $VERSION = "1.1";
+my $BUILD = "151208";
 
 #----------------
 
@@ -99,16 +99,20 @@ sub setup_file_input {
     return;
 }
 
+my $OUTDIR = undef;
 if (@ARGV) {
     ($UserInput)  = @ARGV;
     if ($UserInput =~ /^--?h(elp)*$/i) {
         usage_message();
+    } elsif ($UserInput =~ /^--?o[utdir]*$/i) {
+        shift @ARGV;
+        $OUTDIR = shift @ARGV;
+        run_program(@ARGV);
     } else {
         print "Running program\n";
         run_program(@ARGV);
     }
-}
-elsif ($#ARGV < 0){#run as GUI
+} elsif ($#ARGV < 0){#run as GUI
     $MainWindow = MainWindow->new(-title=>'STAMP sample2barcode generator'.
                                           " (v$VERSION)");
     $MainWindow->geometry("620x470+0+0");
@@ -125,6 +129,8 @@ elsif ($#ARGV < 0){#run as GUI
 
     $TextBox = $MainWindow->Scrolled(qw' Text -height 20 -width 70', 
                                      -scrollbars=>'e')->pack;
+    $TextBox->DropSite(-dropcommand => [\&accept_drop, $TextBox ],
+              -droptypes => ($^O eq 'MSWin32' ? 'Win32' : ['XDND', 'Sun']));
 
     my $frame3 = $MainWindow->Frame;
     $frame3->Button( -width=>15, -text=>'Reset',
@@ -183,9 +189,10 @@ sub create_message_string {
     # as input file.
     my ($basename, $outpath) = fileparse($inputfile);
     if ($0 =~ /^K/) { ($basename, $outpath) = fileparse($0); }
+    if ($OUTDIR && -d $OUTDIR) { $outpath = $OUTDIR }
     my $outfile = File::Spec->catfile($outpath, 
                   "sample2barcode_STAMP$runnum.txt");
-    print STDERR "\nOutput file: $outfile\n";
+    print STDERR "\nOutput file: $outfile\n\n";
     open(my $ofh, ">", $outfile) or die ">$outfile: $!";
     print $ofh $contents;
     close $ofh;
@@ -215,17 +222,22 @@ sub get_sample_data {
     for(my $i=0; $i<@cells; $i++) {
         my @columnvals = map { defined $_ ? $_ : '' } @{ $cells[$i] };
         # Find stamp run
-        if (my @runnum = grep(/^stamp\s*\d+/i, @columnvals)) {
-            $runnum[0] =~ s/stamp\s*(\d+)/$1/i;
-            $runnum = sprintf "%03d", $runnum[0];
+        my $stamprun_patt = '^stamp\s*[id:\s]*[\s_]*(\d+)([a-z]*)[\s_]*\b.*$';
+        if (my @runnum = grep(/$stamprun_patt/i, @columnvals)) {
+            if (!$runnum) { # take first matching candidate
+                $runnum[0] =~ s/$stamprun_patt/$1/i;
+                $runnum = sprintf "%03d", $runnum[0];
+                if ($2 && length($2)<5) { $runnum .= $2 }
+            }
+
         }
         if (grep(/name/i, @columnvals)) {
             $data{name} = get_column_values('name', \@columnvals);
-        } elsif (grep(/lab#|acc#/i, @columnvals)) {
-            $data{lab} = get_column_values('lab#', \@columnvals);
+        } elsif (grep(!/old/ && /(lab#|acc#)/i, @columnvals)) {
+            $data{lab} = get_column_values('(lab#|acc#)', \@columnvals);
         } elsif (grep(/mrn#/i, @columnvals)) {
             $data{mrn} = get_column_values('mrn#', \@columnvals);
-        } elsif (grep(/barcode/i, @columnvals)) {
+        } elsif (grep(/^\s*barcode\s*$/i, @columnvals)) {
             $data{barcode} = get_column_values('barcode', \@columnvals);
         }
     }
@@ -245,15 +257,17 @@ sub get_column_values {
     my $flag = 0;
     my %values;
     # Get values in column after field
+    my $match;
     for(my $j=0; $j<@$columnvals; $j++) {
         if ($flag && $$columnvals[$j]) {
             $values{$j} = $$columnvals[$j];
             $values{$j} =~ s/^\s+|\s+$//;
-        } elsif ($$columnvals[$j] =~ /$field/i) {
+        } elsif ($$columnvals[$j] =~ /($field)/i) {
+            $match = $1;
             $flag = 1;
         }
     }
-    print STDERR "  $field: ".scalar(keys %values). " values\n";
+    print STDERR "  $match: ".scalar(keys %values). " values\n";
     (\%values);
 }
 
@@ -265,16 +279,36 @@ sub create_sample2barcode {
     my @i = sort {$a<=>$b} keys %{ $$data{name} };
 
     foreach my $i (@i) {
-        # Change name to last name + first initial(s)
         my $name = $$data{name}{$i};
-        $name =~ s/,?[ _]([A-Z])[a-z]*/$1/g;
-        $name =~ s/-//; #remove hyphens in hyphenated names
-        print STDERR "$$data{name}{$i} --> $name\n";
+        next unless $name;
         my $lab = $$data{lab}{$i} || '';
         my $mrn = $$data{mrn}{$i} || '';
-        # control is special case w/o lab# or MRN
-        my $sample = $lab || $mrn ?  join("_", $name, $lab, $mrn) : 
-                     $name . '_'.$runnum;
+        my $sample;
+        if ($name =~ /^(tr?u?q.?3|molt4).*$runnum/i) { 
+            $sample = $name;
+        } elsif ($name =~ /^tr?u?q.?3/i) {
+            $sample = "TruQ3_$runnum";
+        } elsif ($name =~ /^molt4/i) {
+            $sample = "MOLT4_$runnum";
+        } elsif ($lab || $mrn) { #patient name
+            # Change name to last name + first initial(s)
+            $name =~ s/-//g; #remove hyphens in hyphenated names
+            $name =~ s/,/_/g;
+            my ($last, $first) = $name =~ /_/ ? split(/_/, $name, 2) :
+                                 split(/\s/, $name, 2);
+            unless (defined($first)) { $first = ''; }
+            $first =~ s/([A-Z])[a-z]*/$1/g;
+            $name = $last.$first;
+            $name =~ s/[\s,]+//g;
+            $name =~ s/_([A-Z])[^a-z]?/$1/;
+            $name =~ s/\(/_/g;
+            $name =~ s/\)//g;
+            print STDERR "$$data{name}{$i} --> $name\n";
+            $sample = join("_", $name, $lab, $mrn);
+        } else { # no lab or mrn
+            $sample = $name;
+        }
+        $sample =~ s/\s//g;
         my $barcode = $$data{barcode}{$i};
         unless ($barcode) {
             print STDERR "No barcode for '$name'; SKIPPING\n";
