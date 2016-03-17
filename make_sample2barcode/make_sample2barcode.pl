@@ -63,8 +63,8 @@ Print short usage message.
 
 ### CONSTANTS
 
-my $VERSION = "1.1";
-my $BUILD = "151208";
+my $VERSION = "1.2";
+my $BUILD = "160317";
 
 #----------------
 
@@ -278,18 +278,21 @@ sub create_sample2barcode {
     my $contents = '';
     my @i = sort {$a<=>$b} keys %{ $$data{name} };
 
+    my %samplenames;
     foreach my $i (@i) {
         my $name = $$data{name}{$i};
         next unless $name;
         my $lab = $$data{lab}{$i} || '';
         my $mrn = $$data{mrn}{$i} || '';
         my $sample;
-        if ($name =~ /^(tr?u?q.?3|molt4).*$runnum/i) { 
+        if ($name =~ /^(tr?u?q.?3|molt4|hd753).*$runnum/i) { 
             $sample = $name;
         } elsif ($name =~ /^tr?u?q.?3/i) {
             $sample = "TruQ3_$runnum";
         } elsif ($name =~ /^molt4/i) {
             $sample = "MOLT4_$runnum";
+        } elsif ($name =~ /^hd753/i) {
+            $sample = "HD753_$runnum";
         } elsif ($lab || $mrn) { #patient name
             # Change name to last name + first initial(s)
             $name =~ s/-//g; #remove hyphens in hyphenated names
@@ -308,7 +311,15 @@ sub create_sample2barcode {
         } else { # no lab or mrn
             $sample = $name;
         }
-        $sample =~ s/\s//g;
+        #remove spaces and non-standard characters
+        $sample =~ s/[\s\x9F-\xFF]//g;
+        #make sure not to have duplicate names
+        if (exists $samplenames{$sample}) {
+            $samplenames{$sample}++;
+            $sample .="-$samplenames{$sample}";
+        } else {
+            $samplenames{$sample} = 1;
+        }
         my $barcode = $$data{barcode}{$i};
         unless ($barcode) {
             print STDERR "No barcode for '$name'; SKIPPING\n";
