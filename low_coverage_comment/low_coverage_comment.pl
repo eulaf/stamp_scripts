@@ -50,8 +50,8 @@ Print restructuredtext formatted output to stdout.
 #-----------------------------------------------------------------------------
 ### CONSTANTS
 
-my $VERSION = "1.4";
-my $BUILD = "150803";
+my $VERSION = "1.5";
+my $BUILD = "160318";
 my $OUTPUT_TEXT = "Portions of the following gene(s) failed to meet the".
 " minimum coverage of MINCOVx: GENELIST. Low coverage may adversely affect".
 " the sensitivity of the assay. If clinically indicated, repeat testing".
@@ -365,8 +365,12 @@ sub get_low_cov_genes_stamp {
         my @lines = grep(/\w/, map { split(/[\n\r]/m, $_) } <$fh>);
         chomp @lines;
         $fh->close;
+        my $mindepthfield;
         while (@lines) {
-            last if $lines[0] =~ /Description.*Min Depth/;
+            if ($lines[0] =~ /Description.*\t(Min.Depth)\t/i) {
+                $mindepthfield = $1;
+                last;
+            }
             shift @lines;
         }
         croak "Required columns 'Description', 'Min Depth' not found ".
@@ -375,15 +379,15 @@ sub get_low_cov_genes_stamp {
         foreach my $l (@lines) {
             my @v = split(/\t/, $l);
             my %d = map { $_=> shift @v } @fields;
-            if ($d{'Description'} && defined($d{'Min Depth'}) && 
-                    $d{'Min Depth'} =~ /^\d+$/) {
+            if ($d{'Description'} && defined($d{$mindepthfield}) && 
+                    $d{$mindepthfield} =~ /^\d+$/) {
                 $numregions++;
                 my $gene = $d{'Description'};
                 $gene =~ s/_.*//;
-                if ($d{'Min Depth'} < $mincoverage) {
+                if ($d{$mindepthfield} < $mincoverage) {
                     $genes{$gene} = $d{Chr};
                 }
-                if ($d{Chr} eq 'chrY' and $d{'Min Depth'} >= $MALE_MINCOV) {
+                if ($d{Chr} eq 'chrY' and $d{$mindepthfield} >= $MALE_MINCOV) {
                     $is_male = 1;
                 }
             } else {
