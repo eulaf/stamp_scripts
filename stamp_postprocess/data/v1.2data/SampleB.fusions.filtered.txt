@@ -1,0 +1,1 @@
+Est_Type	Region1	Region2	Break1	Break2	Break_support1	Break_support2	Break_offset	Orientation	Order1	Order2	Break_depth	Proper_pair_support	Unmapped_support	Improper_pair_support	Paired_end_depth	Total_depth	Fusion_seq	Non-templated_seq	Region1_strand	Region2_strand	Topology_string

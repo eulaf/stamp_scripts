@@ -1,0 +1,17 @@
+##fileformat=VCFv4.1
+##source=Stanford_Solid_Tumor_Actionable_Mutation_Panel
+##INFO=<ID=DP,Number=1,Type=Integer,Description="Quality Read Depth">
+##INFO=<ID=RD,Number=1,Type=Integer,Description="Depth of reference-supporting bases">
+##INFO=<ID=AD,Number=1,Type=Integer,Description="Depth of variant-supporting bases">
+##INFO=<ID=FREQ,Number=1,Type=Float,Description="Variant allele frequency">
+##INFO=<ID=GENE,Number=.,Type=String,Description="Reference gene">
+##INFO=<ID=RT,Number=1,Type=String,Description="Reference transcript">
+##INFO=<ID=AA,Number=1,Type=String,Description="Predicted amino acid change">
+##INFO=<ID=CDS,Number=1,Type=String,Description="Predicted coding sequence change">
+##INFO=<ID=COSMIC_ID,Number=.,Type=String,Description="COSMIC_ID from Cosmic70">
+#CHROM	POS	ID	REF	ALT	QUAL	FILTER	INFO
+13	48878114	.	ACCG	A	.	PASS	DP=524;RD=516;AD=7;FREQ=1.34;GENE=RB1;RT=ENST00000267163;AA=23_23del;CDS=67_69del;COSMIC_ID=.
+5	917213	.	A	G	.	PASS	DP=1506;RD=645;AD=861;FREQ=57.17;GENE=TRIP13;RT=ENST00000166345;AA=I432V;CDS=1294A>G;COSMIC_ID=.
+12	25398285	.	C	G	.	PASS	DP=562;RD=509;AD=53;FREQ=9.43;GENE=KRAS;RT=ENST00000311936;AA=G12R;CDS=34G>C;COSMIC_ID=COSM518,COSM1157797
+14	42356550	.	C	A	.	PASS	DP=2683;RD=2561;AD=122;FREQ=4.55;GENE=LRFN5;RT=ENST00000298119;AA=P241H;CDS=722C>A;COSMIC_ID=.
+17	7578406	.	C	T	.	PASS	DP=1719;RD=1614;AD=105;FREQ=6.11;GENE=TP53;RT=ENST00000269305;AA=R175H;CDS=524G>A;COSMIC_ID=COSM3355994,COSM1640851,COSM99024,COSM99023,COSM10648,COSM99914,COSM99022

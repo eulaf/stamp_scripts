@@ -1,0 +1,6 @@
+Sample	SNVs	Indels	Fusions
+SampleA	9	3	3
+SampleC	8	2	9
+HD753	75	10	8
+SampleB	6	1	6
+TruQ3_146	70	10	1
