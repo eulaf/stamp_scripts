@@ -61,7 +61,7 @@ def massage_data(data):
                 d['expectedVAF'] = float(d['expectedVAF'].rstrip('%'))
             else:
                 d['expectedVAF'] = None
-        for f in ('dbSNP138_ID', 'COSMIC70_ID'):
+        for f in ('dbSNP', 'COSMIC'):
             if f in d and d[f]=='NA':
                 d[f] = None
 
@@ -71,7 +71,11 @@ def count_uppercase(s):
 def field2dbfield(f):
     """Convert field from variant report style to match db column name"""
     newf = f.replace(' ','_')
-    if count_uppercase(newf)<3:
+    if f.startswith('dbSNP'):
+        newf = 'dbSNP'
+    elif f.startswith('COSMIC'):
+        newf = 'COSMIC'
+    elif count_uppercase(newf)<3:
         newf = newf.lower() 
     return newf
 
@@ -130,24 +134,28 @@ def parse_truth(truthfile):
 def parse_variant_file(vfile):
     sys.stderr.write("\nReading variant report: {}\n".format(vfile))
     sample = os.path.basename(vfile).replace('.variant_report.txt', '')
-    runnum = sample.lstrip('TruQ3_')
-    stamprun = "STAMP{}".format(runnum) if runnum else ''
+    runnum = sample.lstrip('TRUQtruq3_').lstrip('STAMP')
+    run = "STAMP{}".format(runnum) if runnum else ''
     vinfo = parse_tab_file(vfile, keyfunc=create_dkey, 
                            fieldfunc=field2dbfield)
     massage_data(vinfo['data'])
+    sys.stderr.write("  Run\t{}\n  Sample\t{}\n".format(run, sample))
     sys.stderr.write("  {} mutations\n".format(len(vinfo['data'])))
-    return (vinfo, stamprun, sample)
+    return (vinfo, run, sample)
 
 #-----------------------------------------------------------------------------
 
-def compare_variants(truth, vinfo, counts={}):
+def compare_variants(truth, vinfo, counts={}, defaultstatus='PASS'):
     truths_seen = dict([ (dkey, False) for dkey in truth.keys() ])
-    summary = { 'Total':0, 'Expected':0, 'Unexpected':0, }
+    summary = { 'Total':0, 'Expected':0, 'Unexpected':0, 
+                'Status': defaultstatus }
     if not counts:
         counts.update({ 'Total':0, 'Expected':defaultdict(int),
-                   'Unexpected':defaultdict(int), })
+               'Unexpected':defaultdict(int), })
     counts['Total'] += 1
     for d in vinfo['data']:
+        d['Expected?'] = 'Not expected'
+#        if d['HGVS']=='-': continue
         dkey = create_dkey(d)
         summary['Total'] += 1
         if dkey in truth:
@@ -158,12 +166,15 @@ def compare_variants(truth, vinfo, counts={}):
         else:
             counts['Unexpected'][dkey] += 1
             summary['Unexpected'] += 1
-            d['Expected?'] = 'Not expected'
     notseen = [ dkey for dkey in truths_seen.keys() if not truths_seen[dkey] ]
     summary['Not found'] = len(notseen)
     summary['notseen'] = notseen
     if notseen:
-        sys.stderr.write("Not found: "+", ".join(notseen)+"\n")
+        sys.stderr.write("    Not found: "+", ".join(notseen)+"\n")
+        if len(notseen) > summary['Expected']: 
+            summary['Status'] = 'FAIL'
+            sys.stderr.write("Status: FAIL {} > {}\n".format(len(notseen),
+                             summary['Expected']))
     else:
         sys.stderr.write("All truths found\n")
     return summary
@@ -226,7 +237,7 @@ def add_schema(dbh, schemafile):
 
 def save_mutations(cursor, data, is_expected=0):
     fields = ['id', 'gene', 'chr', 'position', 'strand', 'ref_transcript', 
-              'ref', 'var', 'dbSNP138_ID', 'COSMIC70_ID', 'HGVS', 'protein', 
+              'ref', 'var', 'dbSNP', 'COSMIC', 'HGVS', 'protein', 
               'whitelist', 'expectedVAF']
     ins_sql = 'INSERT INTO mutation VALUES (?,?' + ',?'*len(fields) + ')'
     for row in data:
@@ -237,11 +248,17 @@ def save_mutations(cursor, data, is_expected=0):
         mut.append(current_time())
         cursor.execute(ins_sql, mut)
 
-def save_run(cursor, run_name, sample_name):
-#    m = re.search("\d+$", stamprun)
-#    num = m.group(0)
-    cursor.execute("INSERT INTO run (run_name, sample_name, last_modified)"+\
-                   " VALUES (?,?,?)", (run_name, sample_name, current_time()))
+def save_run(cursor, run_name, sample_name, status):
+    cursor.execute("INSERT INTO run (run_name, sample_name, run_status"+\
+                   ", last_modified) VALUES (?,?,?,?)", 
+                   (run_name, sample_name, status, current_time()))
+
+def update_run(cursor, run_name, sample_name, status):
+    sys.stderr.write("Updating run {}, {}, status={}\n".format(run_name,
+                     sample_name, status))
+    cursor.execute("UPDATE run SET run_status=?, last_modified=?"+\
+                   " WHERE run_name=? AND sample_name=?",
+                   (status, current_time(), run_name, sample_name))
 
 def save_vaf(cursor, run_id, d, debug=False):
     mut = get_mutation(cursor, d['gene'], d['position'], d['ref'], d['var'])
@@ -310,25 +327,29 @@ def get_num_expected_mutations(cursor):
     return ans[0] if ans else None
 
 def update_run_counts(cursor, run_id):
-    tot_expected = get_num_expected_mutations(cursor)
-    limit = int(tot_expected/2)
-    cmd = "UPDATE run SET run_status=?," +\
+#    tot_expected = get_num_expected_mutations(cursor)
+#    limit = int(tot_expected/2)
+    cmd = "UPDATE run SET " +\
           " num_mutations=(SELECT COUNT(*) FROM vaf WHERE run_id=?)," +\
           " num_expected=(SELECT COUNT(*) FROM vaf v JOIN mutation m" +\
           " ON m.id=v.mutation_id WHERE m.is_expected=? AND v.run_id=?)" +\
           " WHERE run.id=?"
-    cursor.execute(cmd, ['PASS', run_id, 1, run_id, run_id])
-    cmd = "UPDATE run SET run_status = ? WHERE run.id=?" +\
-          " AND run.num_mutations < {}".format(limit)
-    cursor.execute(cmd, ['FAIL', run_id])
+    cursor.execute(cmd, [run_id, 1, run_id, run_id])
+#    cmd = "UPDATE run SET run_status = ? WHERE run.id=?" +\
+#          " AND run.num_mutations < {}".format(limit)
+#    cursor.execute(cmd, ['FAIL', run_id])
 
 def delete_vafs_for_run(cursor, run_id):
     cursor.execute("DELETE FROM vaf WHERE run_id=?", (run_id,))
 
-def get_vafs_for_run(cursor, run_id):
-    cmd = "SELECT * FROM vaf AS v JOIN mutation AS m ON v.mutation_id=m.id" +\
-          " WHERE v.run_id = ?"
-    cursor.execute(cmd, [run_id,])
+def get_vafs_for_run(cursor, run_id, run_status=None):
+    cmd = "SELECT * FROM vaf v, mutation m, run r ON v.mutation_id=m.id" +\
+          " AND v.run_id=r.id WHERE v.run_id=?" 
+    args = [run_id,]
+    if run_status:
+        cmd += " AND r.run_status=?"
+        args.append(run_status)
+    cursor.execute(cmd, args)
     results = results_as_dict(cursor)
     return results
 
@@ -396,27 +417,38 @@ def check_db(dbfile, schemafile, truthfile):
     sys.stderr.write(''.join(msgs))
     return (dbh, tinfo, msgs)
 
-def save2db(dbh, stamprun, sample, vinfo, force=False):
+def save2db(dbh, runname, sample, status, vinfo, force=False):
+    if not runname or not sample:
+        if sample:
+            sys.stderr.write("  Need run name for sample {}\n".format(sample))
+        elif runname:
+            sys.stderr.write("  Need sample for run {}\n".format(runname))
+        else:
+            sys.stderr.write("  Need sample and run name\n")
+        sys.stderr.flush()
+        return 0
     cursor = dbh.cursor()
-    run = get_run(cursor, stamprun, sample)
-    if not run or force:
+    run = get_run(cursor, runname, sample)
+    if force or not run:
         if run and force:
             sys.stderr.write('  Deleting old data for {}:{} in db.\n'.format(
-                             stamprun, sample))
+                             runname, sample))
+            update_run(cursor, runname, sample, status)
             delete_vafs_for_run(cursor, run['id'])
         elif not run:
-            sys.stderr.write('  Saving run {}:{} in db.\n'.format(stamprun, 
+            sys.stderr.write('  Saving run {}:{} in db.\n'.format(runname, 
                              sample))
-            save_run(cursor, stamprun, sample)
-            run = get_run(cursor, stamprun, sample)
+            save_run(cursor, runname, sample, status)
+            run = get_run(cursor, runname, sample)
         for d in vinfo['data']:
             save_vaf(cursor, run['id'], d)
         update_run_counts(cursor, run['id'])
         dbh.commit()
     vafs = get_vafs_for_run(cursor, run['id'])
     sys.stderr.write('  Have {} mutations for run {}:{} in db.\n'.format(
-                     len(vafs), stamprun, sample))
+                     len(vafs), runname, sample))
     sys.stderr.flush()
+    return 1
 
 
 #----spreadsheet.py-----------------------------------------------------------
@@ -430,30 +462,42 @@ def convert_to_excel_col(colnum):
         let = let1 + let
     return let
 
+def add_formats_to_workbook(workbook):
+    wbformat = {}
+    wbformat['bold'] = workbook.add_format({'bold': True})
+    wbformat['perc'] = workbook.add_format({'num_format': '#.##%'})
+    wbformat['red'] = workbook.add_format({'bg_color': '#C58886', 
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['ltred'] = workbook.add_format({'bg_color': '#E9D4D3', 
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['orange'] = workbook.add_format({'bg_color': '#FCD5B4',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['ltgreen'] = workbook.add_format({'bg_color': '#EBF1DE',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['ltblue'] = workbook.add_format({'bg_color': '#D7E1EB',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['blue'] = workbook.add_format({'bg_color': '#88A4C5',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['gray'] = workbook.add_format({'bg_color': '#F0F0F0',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['dkgray'] = workbook.add_format({'bg_color': '#BFBFBF',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['ltbluepatt'] = workbook.add_format({'fg_color': '#DCE6F0', 
+                                       'pattern': 8,
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['gray_perc'] = workbook.add_format({'num_format': '#.##%',
+                                       'bg_color': '#F0F0F0',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat['dkgray_perc'] = workbook.add_format({'num_format': '#.##%',
+                                       'bg_color': '#BFBFBF',
+                                       'border': 1, 'border_color':'#CDCDCD'})
+    return wbformat
+
 def print_spreadsheet_excel(data, outfile, hiderows=[], fieldfunc=None):
     sys.stderr.write("Writing {}\n".format(outfile))
     workbook = xlsxwriter.Workbook(outfile)
     worksheet = workbook.add_worksheet()
-    bold_format = workbook.add_format({'bold': True})
-    perc_format = workbook.add_format({'num_format': '#.##%'})
-    red_format = workbook.add_format({'bg_color': '#C58886', 
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    ltred_format = workbook.add_format({'bg_color': '#E9D4D3', 
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    orange_format = workbook.add_format({'bg_color': '#FCD5B4',
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    ltblue_format = workbook.add_format({'bg_color': '#D7E1EB',
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    blue_format = workbook.add_format({'bg_color': '#88A4C5',
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    gray_format = workbook.add_format({'bg_color': '#F0F0F0',
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    ltbluepatt_format = workbook.add_format({'fg_color': '#DCE6F0', 
-                                       'pattern': 8,
-                                       'border': 1, 'border_color':'#CDCDCD'})
-    gray_perc_format = workbook.add_format({'num_format': '#.##%',
-                                       'bg_color': '#F0F0F0',
-                                       'border': 1, 'border_color':'#CDCDCD'})
+    wbformat = add_formats_to_workbook(workbook)
     rownum = 0
     # comment lines
     for line in data['header']:
@@ -462,17 +506,17 @@ def print_spreadsheet_excel(data, outfile, hiderows=[], fieldfunc=None):
     # print column names
     for colnum, f in enumerate(data['fields']):
         colname = fieldfunc(f) if fieldfunc else f
-        worksheet.write(rownum, colnum, colname, bold_format)
+        worksheet.write(rownum, colnum, colname, wbformat['bold'])
     calc_fields = ['AverageVAF', 'StddevVAF', '%Detection']
     i_col_avg = colnum+1
     i_col_std = colnum+2
     for f in calc_fields:
         colnum += 1
-        worksheet.write(rownum, colnum, f, bold_format)
+        worksheet.write(rownum, colnum, f, wbformat['bold'])
     i_col_run_s = colnum + 1
     for f in data['runs']:
         colnum += 1
-        worksheet.write(rownum, colnum, f, bold_format)
+        worksheet.write(rownum, colnum, f, wbformat['bold'])
     i_col_run_e = colnum
     runcolxl_s = convert_to_excel_col(i_col_run_s)
     runcolxl_e = convert_to_excel_col(i_col_run_e)
@@ -483,7 +527,8 @@ def print_spreadsheet_excel(data, outfile, hiderows=[], fieldfunc=None):
     # print data
     numvariants = 0
     for label in ('expected', 'not_expected'):
-      percformat = perc_format if label=='expected' else gray_perc_format
+      percformat = wbformat['perc'] if label=='expected' else \
+                   wbformat['gray_perc']
       for dkey in sorted(data[label].keys()):
         numvariants += 1
         rownum += 1
@@ -503,10 +548,16 @@ def print_spreadsheet_excel(data, outfile, hiderows=[], fieldfunc=None):
             if d: worksheet.write_number(rownum, colnum+i+4, float(d['vaf']))
         runrange = "{1}{0}:{2}{0}".format(rownum+1, runcolxl_s, runcolxl_e)
         colnum += 1
-        worksheet.write(rownum, colnum, '=AVERAGE({})'.format(runrange))
+#        worksheet.write(rownum, colnum, '=AVERAGE({})'.format(runrange))
+        worksheet.write_array_formula(rownum, colnum, rownum, colnum,
+                        '{'+'=AVERAGE(IF(ISBLANK({0}),0,{0}))'.format(
+                        runrange)+'}')
         colnum += 1
         if len(mutdat)>1:
-            worksheet.write(rownum, colnum, '=STDEV({})'.format(runrange))
+#            worksheet.write(rownum, colnum, '=STDEV({})'.format(runrange))
+            worksheet.write_array_formula(rownum, colnum, rownum, colnum,
+                        '{'+'=STDEV(IF(ISBLANK({0}),0,{0}))'.format(
+                        runrange)+'}')
         colnum += 1
         worksheet.write(rownum, colnum, '=COUNT({})/{}'.format(runrange, 
                         len(data['runs'])), percformat)
@@ -517,29 +568,29 @@ def print_spreadsheet_excel(data, outfile, hiderows=[], fieldfunc=None):
                                                         stdcolxl),
                'maximum':'3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
                                                         stdcolxl),
-               'format':ltred_format, })
+               'format':wbformat['ltred'], })
             worksheet.conditional_format(runrange, 
               {'type':'cell', 'criteria':'>', 
                'value':'3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
                                                       stdcolxl),
-               'format':red_format, })
+               'format':wbformat['red'], })
             worksheet.conditional_format(runrange, 
               {'type':'cell', 'criteria':'between', 
                'minimum':'-2*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
                                                          stdcolxl),
                'maximum':'-3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
                                                          stdcolxl),
-               'format':ltblue_format, })
+               'format':wbformat['ltblue'], })
             worksheet.conditional_format(runrange, 
               {'type':'cell', 'criteria':'<', 
                'value':'-3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
                                                        stdcolxl),
-               'format':blue_format, })
+               'format':wbformat['blue'], })
             worksheet.conditional_format(runrange, {'type':'blanks', 
-                                         'format':ltbluepatt_format, })
+                                         'format':wbformat['ltbluepatt'], })
         else: 
 #            wholerow = "A{0}:{1}{0}".format(rownum+1, runcolxl_e)
-            worksheet.set_row(rownum, None, gray_format)
+            worksheet.set_row(rownum, None, wbformat['gray'])
     worksheet.set_column(i_col_run_s-1, i_col_run_e-1, 10) #set col width
     worksheet.set_column(i_position, i_position, 9)
     for i in hiderows:
@@ -572,12 +623,12 @@ def generate_excel_spreadsheet(dbh, tfields, outfile):
     header = [ "# This spreadsheet is automatically generated." +\
                " Any edits will be lost in future versions.",
                "# Failed runs (not in spreadsheet): {}".format(
-               ", ".join(sorted(failed_runs.keys()))),
+               ", ".join(sorted(failed_runs.keys())) if failed_runs else 0),
                "# Num runs in spreadsheet: {}".format(len(good_runs.keys())), 
                "# Num expected variants: {}".format(len(data['expected'])), ]
     fields = tfields[:]
-    fields.remove('dbSNP138_ID')
-    fields.remove('COSMIC70_ID')
+    fields.remove('dbSNP')
+    fields.remove('COSMIC')
     fields.remove('ref')
     fields.remove('var')
     if 'is_expected' in fields: fields.remove('is_expected')
@@ -677,22 +728,37 @@ class StampFrame(wx.Frame):
             for i, info in enumerate(self.notebook.results):
                 if not info: continue
                 entries = self.notebook.entries[i]
-                stamprun = entries['run'].GetValue()
                 sample = entries['sample'].GetValue()
-                save2db(self.dbh, stamprun, sample, info['vinfo'])
-                self.text.AppendText("  Saved {} data to db.\n".format(sample))
+                run = entries['run'].GetValue()
+                if not run or not sample:
+                    msg = "    {}: Not saved.".format(i)
+                    if not run and not sample:
+                        msg += "  Need run and sample\n"
+                    elif not run:
+                        msg += "  Need run name\n"
+                    else:
+                        msg += "  Need sample name\n"
+                    self.text.AppendText(msg)
+                    continue
+                statusnum = entries['status'].GetSelection()
+                status = entries['status'].GetString(statusnum)
+                saved = save2db(self.dbh, run, sample, status, info['vinfo'], True)
+                if saved:
+                    self.text.AppendText("        Saved {} data to db.\n".format(sample))
+                else:
+                    self.text.AppendText("        {} not saved to db.\n".format(sample))
             summ = db_summary(self.dbh.cursor())
             self.notebook.tabOne.ChangeMessage(''.join(summ))
         try:
             self.text.AppendText("  Updating spreadsheet.\n")
             res = generate_excel_spreadsheet(self.dbh, 
                   self.tinfo['fields'], self.spreadsheet)
-            self.text.AppendText("    Spreadsheet now contains "+\
+            self.text.AppendText("      Spreadsheet now contains "+\
                 "{} runs and {} unique variants\n".format(res['num_runs'],
                 res['num_variants']))
             if res['failedruns']:
                 self.text.AppendText(
-                     "    Failed runs not included: {}\n".format(
+                     "      Failed runs not included: {}\n".format(
                      ", ".join(res['failedruns'])))
         except Exception, e:
             self.text.AppendText("    ERROR: {}{}\n\n".format(
@@ -721,14 +787,14 @@ class VariantReportDrop(wx.FileDropTarget):
             self.window.AppendText("File {}:    {}\n".format(self.num_files, 
                                    variant_file))
             try:
-                (vinfo, stamprun, sample) = parse_variant_file(
-                                                 variant_file)
-                summary = compare_variants(self.tinfo['datadict'], 
-                                                    vinfo, counts)
+                (vinfo, run, sample) = parse_variant_file(variant_file)
+                summary = compare_variants(self.tinfo['datadict'], vinfo, 
+                                           counts)
                 info = ({'num': self.num_files, 'file':variant_file,
                          'vinfo': vinfo, 'summary': summary, 
-                         'stamprun': stamprun, 'sample': sample })
-                title = "{}: {}".format(self.num_files, stamprun)
+                         'status': summary['Status'],
+                         'run': run, 'sample': sample })
+                title = "{}: {}".format(self.num_files, run)
                 self.notebook.AddResultsTab(info, title=title)
             except KeyError, e:
                 self.window.AppendText("    ERROR:  Bad file format.  " +\
@@ -740,7 +806,7 @@ class VariantReportDrop(wx.FileDropTarget):
 
 class StampNotebook(fnb.FlatNotebook):
     def __init__(self, parent, msg=None):
-        fnb.FlatNotebook.__init__(self, parent, id=wx.ID_ANY, size=(500, 175),
+        fnb.FlatNotebook.__init__(self, parent, id=wx.ID_ANY, size=(500, 200),
             agwStyle=fnb.FNB_VC8|fnb.FNB_X_ON_TAB|fnb.FNB_NO_X_BUTTON|
             fnb.FNB_NAV_BUTTONS_WHEN_NEEDED)
 
@@ -789,10 +855,15 @@ class TabPanel_Results(wx.Panel):
         wx.Panel.__init__(self, parent=parent, id=wx.ID_ANY)
 
         runLabel = wx.StaticText(self, -1, "Run:")
-        runEntry = wx.TextCtrl(self, -1, info['stamprun'])
+        runEntry = wx.TextCtrl(self, -1, info['run'])
         sampleLabel = wx.StaticText(self, -1, "Sample:")
         sampleEntry = wx.TextCtrl(self, -1, info['sample'])
-        parent.entries.append({'run': runEntry, 'sample': sampleEntry})
+        statusLabel = wx.StaticText(self, -1, "Status:")
+#        statusEntry = wx.TextCtrl(self, -1, info['status'])
+        statusEntry = wx.Choice(self, -1, choices=['PASS', 'FAIL'])
+        statusEntry.SetSelection(0 if info['status']=='PASS' else 1)
+        parent.entries.append({'run': runEntry, 'sample': sampleEntry,
+                               'status': statusEntry})
         msg = 'All expected mutations found.'
         if len(info['summary']['notseen'])>0:
             msg = "Expected mutations not found:{:5d}".format(
@@ -811,6 +882,9 @@ class TabPanel_Results(wx.Panel):
         entrySizer.Add(runEntry, 0, wx.EXPAND)
         entrySizer.Add(sampleLabel, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
         entrySizer.Add(sampleEntry, 0, wx.EXPAND)
+        entrySizer.Add(statusLabel, 0, wx.ALIGN_RIGHT|wx.ALIGN_CENTER_VERTICAL)
+#        entrySizer.Add(statusEntry, 0, wx.EXPAND)
+        entrySizer.Add(statusEntry, 0)
         panelSizer.Add(entrySizer, 0, wx.EXPAND|wx.ALL, 10)
         panelSizer.Add(infoText, 0, wx.ALIGN_LEFT)
         self.SetSizer(panelSizer)
@@ -830,18 +904,21 @@ if __name__=='__main__':
                         help="STAMP TruQ3 variant report(s)")
     parser.add_argument("-o", "--outdir", 
                         help="Directory to save output file(s)")
+    parser.add_argument("-s", "--status", default='PASS',
+                        help="Status to use for all reports (default: PASS)")
     parser.add_argument("-t", "--text", default=False, action='store_true',
                         help="Print checked variant reports.")
     parser.add_argument("-x", "--excel", default=False, action='store_true',
                         help="Print Excel spreadsheet summarizing all data.")
     parser.add_argument("-d", "--debug", default=False, action='store_true',
                         help="Print extra messages")
-    parser.add_argument("-f", "--force", default=False, action='store_true',
-                        help="Overwrite existing data in db.")
     parser.add_argument("--db", default=REFS['DBFILE'],
                         help="SQLite db file.")
     parser.add_argument("--ref", default=REFS['TRUTHFILE'],
                         help="Expected truths file.")
+    parser.add_argument("--safe", default=True, action='store_false',
+                        dest="force",
+                        help="Do not overwrite existing data in db.")
     parser.add_argument("--schema", default=REFS['SCHEMAFILE'],
                         help="SQLite db schema file.")
     parser.add_argument("--spreadsheet", default=REFS['SPREADSHEET'],
@@ -858,10 +935,11 @@ if __name__=='__main__':
         runs = {}
         for variant_file in args.variant_file:
             if variant_file=='none': continue
-            (vinfo, stamprun, sample) = parse_variant_file(variant_file)
-            summary = compare_variants(tinfo['datadict'], vinfo, counts)
-            save2db(dbh, stamprun, sample, vinfo, args.force)
-            runs[stamprun] = {'vinfo':vinfo, 'summary':summary }
+            (vinfo, run, sample) = parse_variant_file(variant_file)
+            summary = compare_variants(tinfo['datadict'], vinfo, counts,
+                                       args.status)
+            save2db(dbh, run, sample, summary['Status'], vinfo, args.force)
+            runs[run] = {'vinfo':vinfo, 'summary':summary }
             if args.text:
                 outfile = variant_file.replace('.txt','') + ".checked.txt"
                 if args.outdir:
@@ -870,7 +948,7 @@ if __name__=='__main__':
                 if have_file(outfile, force=True):
                     sys.stderr.write("  Already have {}.\n".format(outfile))
                 else:
-                    print_checked_file(runs[stamprun], tinfo, outfile)
+                    print_checked_file(runs[run], tinfo, outfile)
         if args.excel:
             generate_excel_spreadsheet(dbh, tinfo['fields'], args.spreadsheet)
         dbh.close()

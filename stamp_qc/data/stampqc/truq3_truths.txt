@@ -1,4 +1,4 @@
-gene	chr	position	strand	ref_transcript	ref	var	dbSNP138_ID	COSMIC70_ID	HGVS	protein	whitelist	expectedVAF	is_expected
+gene	chr	position	strand	ref_transcript	ref	var	dbSNP	COSMIC	HGVS	protein	whitelist	expectedVAF	is_expected
 ALK	chr2	29416326	minus	ENST00000389048	G	A			c.4627C>T	P1453S	NO	20.0	1
 BRAF	chr7	140453137	minus	ENST00000288602	C	T	rs121913378	COSM1130	c.1798G>A	V600M	YES	4.0	1
 BRAF	chr7	140453136	minus	ENST00000288602	A	T	rs113488022	COSM476	c.1799T>A	V600E	YES	8.0	1

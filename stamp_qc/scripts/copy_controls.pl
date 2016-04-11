@@ -10,7 +10,7 @@ use File::Spec;
 use strict;
 
 my $FORCE=0;
-my $ARCHIVE = q"k:/STAMP_Analysis_DataArchive/AnalysisFiles";
+my $ARCHIVE = q"k:/0 STAMP PDF_reports_DataArchive/AnalysisFiles";
 @ARGV || die "$0 <destdir>\n".
 "\nCopies variant reports from\n$ARCHIVE\nto current directory.\n";
 
