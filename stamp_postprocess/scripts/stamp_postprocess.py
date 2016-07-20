@@ -3,7 +3,8 @@
 """
 Variant report:
 Separate ACCEPTED, CHECK_COMPOUND, CHECK_1-5PCT from NOT_REPORTED 
-by yellow hightlighted row and save as Excel file
+by yellow hightlighted row and save as Excel file.  Add comment
+snippet
 
 Variant report and VCF file:
 Create accepted and rejected VCFs where NOT_REPORTED variants
@@ -16,21 +17,37 @@ save as Excel file.
 SNV and indel depth reports:
 Create text file with low coverage comment.
 
+Fusion reports with transcripts:
+Add transcripts to fusions.filtered.txt files
+
 """
 
 import os
 import sys
 import xlsxwriter
 import openpyxl
+import re
 import wx
 import wx.richtext 
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="1.1"
-BUILD="160415"
+VERSION="1.2"
+BUILD="160719"
+
+# version 1.2 changes 160719
+#   add transcripts to fusion files
+#   add comment to variant report xlsx
+
+# version 1.2 changes 160629
+#   low coverage comment - get gene name by split on '-'
+#   group samples - ignore files ending in 'unfiltered.vcf'
+#   split vcf - sort by chr, pos
 
 #----common.py----------------------------------------------------------------
+
+def getScriptPath():
+    return os.path.dirname(os.path.realpath(sys.argv[0]))
 
 MINCOVERAGE = 200 # min depth coverage for STAMP
 MALE_MINCOV = 60 # chrY min coverage to determine if sample likely male
@@ -39,6 +56,47 @@ LOWCOV_TEXT = "Portions of the following gene(s) failed to meet the"+\
     " Low coverage may adversely affect the sensitivity of the assay."+\
     " If clinically indicated, repeat testing on a new specimen can"+\
     " be considered."
+
+FUSION_TRANSCRIPT_FILE = os.path.join(getScriptPath(), os.pardir, "docs", 
+                         "stamp2_fusion_gene_transcripts.txt")
+FUSION_TRANSCRIPTS = {}
+
+AAPATT = re.compile('([A-Z])')
+AA_convert = {
+    'A': ['Ala', 'Alanine',], 
+    'R': ['Arg', 'Arginine',], 
+    'N': ['Asn', 'Asparagine',], 
+    'D': ['Asp', 'Aspartic acid',], 
+    'C': ['Cys', 'Cysteine',], 
+    'Q': ['Gln', 'Glutamine',], 
+    'E': ['Glu', 'Glutamic acid',], 
+    'G': ['Gly', 'Glycine',], 
+    'H': ['His', 'Histidine',], 
+    'I': ['Ile', 'Isoleucine',], 
+    'L': ['Leu', 'Leucine',], 
+    'K': ['Lys', 'Lysine',], 
+    'M': ['Met', 'Methionine',], 
+    'F': ['Phe', 'Phenylalanine',], 
+    'P': ['Pro', 'Proline',], 
+    'O': ['Pyl', 'Pyrrolysine',], 
+    'S': ['Ser', 'Serine',], 
+    'U': ['Sec', 'Selenocysteine',], 
+    'T': ['Thr', 'Threonine',], 
+    'W': ['Trp', 'Tryptophan',], 
+    'Y': ['Tyr', 'Tyrosine',], 
+    'V': ['Val', 'Valine',], 
+    'B': ['Asx', 'Aspartic acid or Asparagine',], 
+    'Z': ['Glx', 'Glutamic acid or Glutamine',], 
+    'J': ['Xle', 'Leucine of Isoleucine',], 
+    'X': ['Ter', 'Termination codon',], 
+}
+
+def aa_expand(matchobj, num=0):
+    m = matchobj.group(0)
+    expansion = m
+    if m in AA_convert:
+        expansion = AA_convert[m][num]
+    return expansion
 
 def is_float(v):
     try:
@@ -198,7 +256,8 @@ def generate_low_coverage_comment(outlabel, dpindelinfo, dpsnvinfo):
         for row in tabdata.data: 
             mindepth = int(row[i_mindepth])
             if mindepth < MINCOVERAGE:
-                gene = row[i_description].split('_')[0]
+                # '_' for STAMPv1 regions; '-' for STAMPv2 regions
+                gene = row[i_description].split('_')[0].split('-')[0]
                 low_cov_genes[gene] = row[i_chr]
             if row[i_chr]=='chrY' and mindepth >= MALE_MINCOV:
                 is_female = False
@@ -220,7 +279,74 @@ def generate_low_coverage_comment(outlabel, dpindelinfo, dpsnvinfo):
         ofh.write(lcc + '\n')
     sys.stderr.write(lcc + '\n')
     sys.stderr.flush()
-    return outfile
+    return outfile, is_female
+
+def is_substitution_bases(cdot):
+    """Checks if mutation is simple substitution"""
+    flag = False
+    if '>' in cdot:
+        bases = cdot.lstrip('1234567890').split('>')
+        if len(bases)==2 and len(bases[0])==1 and len(bases[1])==1:
+            flag = True
+    return flag 
+
+def aa_change_names_and_codon(pdot):
+    """Returns full amino acid names and codon for amino acids in AA change"""
+    match = re.match(r"([A-Z])(\d+)([A-Z])$", pdot)
+    result = None
+    if match:
+        (aa1, codon, aa2) = match.groups()
+        aa1_name = AA_convert.get(aa1, ['',''])[1].lower()
+        aa2_name = AA_convert.get(aa2, ['',''])[1].lower()
+        if aa1_name and aa2_name:
+            result = [aa1_name, codon, aa2_name]
+    return result
+
+def add_comment_snippet(tabdata):
+    """Variant comments crafted by the fellows generally start with a set
+    format that can be auto-generated to save them time.  For examples:  
+    1. frameshifts
+    The p.Val166fs (c.491dup, p.V166fs) mutation in the PTEN gene results in a
+    frame shift
+    2. termination codon
+    The p.Glu219Ter (c.655G>T, p.E219X) mutation in the KEAP1 gene results in a
+    premature termination codon at amino acid position 219
+    3. simple substitutions: 
+    The p.Thr41Ala (c.121A>G, p.T41A) mutation in the CTNNB1 gene results in a
+    substitution of alanine for threonine at codon 41
+    4. If pdot and AA Change are identical
+    The p.747_753del (c.2240_2257del) mutation in the EGFR gene
+    """
+    tabdata.fields.append('Comment snippet')
+    i_aa = tabdata.fields.index('AA Change')
+    i_cds = tabdata.fields.index('CDS Change')
+    i_gene = tabdata.fields.index('Gene')
+    for row in tabdata.data:
+        if row[i_aa] != '.' and row[i_cds] != '.':
+            pdot = 'p.'+AAPATT.sub(aa_expand, row[i_aa])
+            cdot = 'c.'+row[i_cds]
+            gene = row[i_gene]
+            mutation = '{} ({}, p.{})'.format(pdot, cdot, row[i_aa]) \
+                if pdot != 'p.'+row[i_aa] else '{} ({})'.format(pdot, cdot)
+            comment = 'The {} mutation in the {} gene'.format(mutation, gene)
+            if pdot.endswith('fs'):
+                comment += ' results in a frameshift'
+            elif pdot.endswith('Ter'):
+                comment += ' results in a premature termination codon'
+                p = aa_change_names_and_codon(row[i_aa])
+                if p:
+                    comment += ' at amino acid position {}'.format(p[1])
+            elif is_substitution_bases(row[i_cds]):
+                p = aa_change_names_and_codon(row[i_aa])
+#                sys.stderr.write("substitution p {} -> {}\n".format(row[i_aa], p))
+                if p:
+                    n = 'n' if p[2][0] in ('a','i') else ''
+                    comment += ' results in a substitution of '+\
+                      'a{} {} for the wild-type {} at codon {}'.format(n,
+                      p[2], p[0], p[1])
+#            sys.stderr.write(comment+'\n')
+            row.append(comment)
+    return tabdata
 
 def create_variant_report_xlsx(report, args):
     outfile = outfile_name(report, args.outdir, '.xlsx')
@@ -230,6 +356,7 @@ def create_variant_report_xlsx(report, args):
     fields = None
     highlight_row = ExcelRowData(['']*26, 'gold')
     tabdata = parse_tab_file(report, outfile=outfile)
+    tabdata = add_comment_snippet(tabdata)
     header = [ ExcelRowData([l,]) for l in tabdata.header ]
     header.append(ExcelRowData(tabdata.fields))
     data = []
@@ -261,6 +388,10 @@ def create_variant_report_xlsx(report, args):
         sys.exit("  ERROR: Unexpected num lines\n")
     return tabdata
 
+def pos_sortkey(chrom, pos):
+    chrom = "%02d" % int(chrom) if chrom.isdigit() else "%-2s" % chrom
+    return "%s.%011d" % (chrom, pos)
+
 def split_vcf(vcffile, vinfo, args):
     label = vcffile.replace('.vcf', '')
     if args.outdir:
@@ -276,8 +407,8 @@ def split_vcf(vcffile, vinfo, args):
         pos = int(row[i_pos])
         variantdata[chrom][pos] = row[i_status]
     vcfhead = []
-    vcfaccept = []
-    vcfreject = []
+    vcfaccept = defaultdict(list)
+    vcfreject = defaultdict(list)
     with open(vcffile, 'r') as fh:
         for line in fh:
             if line.startswith('#'):
@@ -286,27 +417,81 @@ def split_vcf(vcffile, vinfo, args):
                 row = line.split("\t", 3)
                 chrom = row[0]
                 pos = int(row[1])
+                sortkey = pos_sortkey(chrom, pos)
                 if variantdata[chrom][pos]=='NOT_REPORTED':
-                    vcfreject.append(line)
+                    vcfreject[sortkey].append(line)
                 else:
-                    vcfaccept.append(line)
+                    vcfaccept[sortkey].append(line)
     with open(acceptfile, 'w') as ofh:
         ofh.write(''.join(vcfhead))
-        ofh.write(''.join(vcfaccept))
+        ofh.write(''.join([ ''.join(vcfaccept[k]) for k in \
+                  sorted(vcfaccept)]))
     sys.stderr.write("    Num accepted:{:4d}\n".format(len(vcfaccept)))
     with open(rejectfile, 'w') as ofh:
         ofh.write(''.join(vcfhead))
-        ofh.write(''.join(vcfreject))
+        ofh.write(''.join([ ''.join(vcfreject[k]) for k in \
+                  sorted(vcfreject)]))
     sys.stderr.write("    Num rejected:{:4d}\n".format(len(vcfreject)))
     return acceptfile, rejectfile
 
+def read_transcript_file(transcriptfile):
+    """Input should be tab-delimited file with two columns: gene and
+    transcript.  Return dict keyed by gene with value transcript."""
+    sys.stderr.write("Reading {}\n".format(transcriptfile))
+    if not os.path.isfile(transcriptfile):
+        sys.exit("  Fusion transcript file {} not found".format(
+                 transcriptfile))
+    transcripts = {}
+    with open(transcriptfile, 'r') as fh:
+        for l in fh:
+            if not l.startswith('#'):
+                data = l.rstrip().split("\t")
+                if len(data)>1:
+                    transcripts[data[0]] = data[1]
+#        transcripts = dict(zip([l.rstrip().split("\t")[:2] for l in fh \
+#                      if "\t" in l.rstrip() and not l.startswith('#')]))
+    return transcripts
+
+def add_transcripts_to_fusion_report(fusionfile, args):
+    fields = []
+    lines = []
+    with open(fusionfile, 'r') as fh:
+        fields = fh.readline().split("\t")
+        lines = [ l for l in fh.readlines() if "\t" in l.rstrip() ]
+    if not lines: 
+        sys.stderr.write("    No fusions\n")
+        return 0
+    else:
+        sys.stderr.write("    {} fusions\n".format(len(lines)))
+    newfile = fusionfile.replace("filtered.txt",'')+'with_transcripts.txt'
+    if args.outdir:
+        newfile = os.path.join(args.outdir, os.path.basename(newfile))
+    i_region1 = None
+    i_region2 = None
+    try:
+        i_region1 = fields.index('Region1')
+        i_region2 = fields.index('Region2')
+    except:
+        sys.exit("Bad format file {}".format(fusionfile))
+    i = i_region2 + 1 # insert transcripts after Region2
+    fields[i:0] = ['Transcript1', 'Transcript2']
+    with open(newfile, 'w') as ofh:
+        ofh.write("\t".join(fields))
+        for line in lines:
+            data = line.split("\t")
+            t1 = FUSION_TRANSCRIPTS.get(data[i_region1], '')
+            t2 = FUSION_TRANSCRIPTS.get(data[i_region2], '')
+            data[i:0] = [t1, t2]
+            ofh.write("\t".join(data))
+    return newfile
 
 def group_files_by_sample(inputfiles):
     extensions = {
-        '.vcf': 'vcf',
         '.depth_report_indels.txt': 'dp_indels', 
         '.depth_report_snvs.txt': 'dp_snvs',
-        '.variant_report.txt': 'v_report', }
+        '.fusions.filtered.txt': 'fusions',
+        '.variant_report.txt': 'v_report', 
+        '.vcf': 'vcf', }
     samples = defaultdict(dict)
     infiles = []
     for in_arg in inputfiles: # input can be files or folders
@@ -318,7 +503,8 @@ def group_files_by_sample(inputfiles):
     badfiles = []
     for infile in infiles:
         if infile.endswith('_accepted.vcf') or \
-           infile.endswith('_rejected.vcf'):
+           infile.endswith('_rejected.vcf') or \
+           infile.endswith('.unfiltered.vcf'):
             badfiles.append(infile)
             continue
         notfound = True
@@ -368,6 +554,7 @@ class StampRTC(wx.richtext.RichTextCtrl):
             ['Low coverage comment', 
              'requires sample.depth_report_indels.txt and '+\
              'sample.depth_report_snvs.txt'],
+            ['Fusion file with transcripts', 'requires fusions.filtered.txt'],
         ]
         self.BeginFontSize(10)
         self.Newline()
@@ -530,11 +717,25 @@ class FileDropProcessing(wx.FileDropTarget):
                     sys.stderr.write("- Generating low coverage comment\n")
                     outlabel = outfile_name(dpsnvinfo.tabfile, args.outdir, 
                                             inext='.depth_report_snvs.txt')
-                    outfile = generate_low_coverage_comment(outlabel, 
-                                               dpindelinfo, dpsnvinfo)
+                    outfile, is_female = generate_low_coverage_comment(
+                                   outlabel, dpindelinfo, dpsnvinfo)
                     if os.path.isfile(outfile):
+                        gender = '(F)' if is_female else '(M)'
+                        self.WriteFormattedText("",
+                            "      --Wrote {} {}".format(
+                            os.path.basename(outfile), gender))
+                    sys.stderr.flush()
+                if 'fusions' in d:
+                    self.WriteFormattedText("Fusions:  ", 
+                        os.path.basename(d['fusions']), True)
+                    sys.stderr.write("- Adding transcripts to fusion file\n")
+                    newfusionfile = add_transcripts_to_fusion_report(
+                                         d['fusions'], self.args)
+                    if newfusionfile==0:
+                        self.WriteFormattedText("","      --No fusions")
+                    elif newfusionfile and os.path.isfile(newfusionfile):
                         self.WriteFormattedText("","      --Wrote {}".format(
-                            os.path.basename(outfile)))
+                            os.path.basename(newfusionfile)))
                     sys.stderr.flush()
             except Exception, e:
                 self.window.WriteText("    ERROR: {} {}\n\n".format(
@@ -557,15 +758,19 @@ if __name__=='__main__':
     descr += " split into accepted and rejected VCF files."
     descr += " A file with low coverage comment is generated if both"
     descr += " indel and SNV depth reports are input."
+    descr += " Transcripts are added any fusions.filtered.txt files."
     parser = ArgumentParser(description=descr)
     parser.add_argument("reports", nargs="*",
                         help="STAMP depth and/or variant report(s)")
     parser.add_argument("-o", "--outdir", 
                         help="Directory to save output file(s)")
+    parser.add_argument("-t", "--transcripts", default=FUSION_TRANSCRIPT_FILE,
+                        help="Fusion transcript file")
     parser.add_argument("--debug", default=False, action='store_true',
                         help="Write debugging messages")
 
     args = parser.parse_args()
+    FUSION_TRANSCRIPTS = read_transcript_file(args.transcripts)
     if len(args.reports)==0:
         run_gui(args)
     else:
@@ -606,6 +811,12 @@ if __name__=='__main__':
                                         inext='.depth_report_snvs.txt')
                 lcc = generate_low_coverage_comment(outlabel, dpindelinfo, 
                                                     dpsnvinfo)
+            else:
+                sys.stderr.write(" NO\n")
+            sys.stderr.write("- Adding transcripts to fusion file: ")
+            if 'fusions' in d:
+                sys.stderr.write(" YES\n")
+                numfusions = add_transcripts_to_fusion_report(d['fusions'], args)
             else:
                 sys.stderr.write(" NO\n")
 
