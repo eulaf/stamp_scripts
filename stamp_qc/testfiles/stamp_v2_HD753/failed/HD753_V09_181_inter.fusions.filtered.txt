@@ -1,0 +1,2 @@
+Est_Type	Region1	Region2	Break1	Break2	Break_support1	Break_support2	Break_offset	Orientation	Order1	Order2	Break_depth	Proper_pair_support	Unmapped_support	Improper_pair_support	Paired_end_depth	Total_depth	Fusion_seq	Non-templated_seq	Region1_strand	Region2_strand	Topology_string
+INV	RET	CCDC6	chr10:43609948	chr10:61638615	4	1	4	1- 2+	CN	CN	5	4	1	0	2	306	ACCGAGACGATGAAGGAGAAGAGGACAGCGGCTGCGATCACCGTGCGGCA <> AGGAATTATTTAACAATTATGACTATTCATTTAGGCCAAGCCATAAGGGA	-	1	-1	<-----|-----<
