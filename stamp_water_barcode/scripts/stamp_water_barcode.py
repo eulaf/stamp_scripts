@@ -18,12 +18,20 @@ import xlsxwriter
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="1.0"
-BUILD="160909"
+VERSION="1.1"
+BUILD="160913"
+
+# 160913 - 
+#  parse STAMP folder name from STAMP runs folder
+#  catch and report errors to gui when creating spreadsheet
+#  sort by stamp run number
+#  change format highlight to >= LIMIT rather than > LIMIT
+#  add notice in GUI when perc above limit
+#  add valid range < 0.5% to spreadsheet header
 
 #----common.py----------------------------------------------------------------
 
-LIMIT=0.005 # = 0.5%
+LIMIT=0.005 # Valid range < 0.5%
 
 def getScriptPath(addpath=None):
     """Return directory containing script or, if addpath is given, a location 
@@ -62,12 +70,15 @@ def get_file_run(infile, i=0):
     m = re.search('([-\w]+)-analysis', filepath)
     m2 = re.search('(ST\w+\d-\d{3,3}.*)[\b\.]', filepath)
     m3 = re.search('[\b_](ST\w{3,3}\d{2,3}.*)[\b\.]', filepath)
+    m4 = re.search('(STAMP\d{3,3}\w*)', filepath)
     if m:
         run = m.group(1)
     elif m2:
         run = m2.group(1)
     elif m3:
         run = m3.group(1)
+    elif m4:
+        run = m4.group(1)
     sys.stderr.write("{}\t{}\n".format(run, infile))
     return run
 
@@ -85,7 +96,7 @@ def stamp_run_sortkey(runname):
         if match:
             stampversion = 'STAMP1'
             runnum = match.group(1)
-    return (stampversion, runnum, runname) 
+    return (runnum, stampversion, runname) 
 
 def analyze_barcode_data(bcdata):
     results = {}
@@ -299,7 +310,8 @@ def add_barcode_sheet_excel(workbook, wbformat, rundata):
     # comment lines
     for line in ('# This spreadsheet is automatically generated.' +\
                  ' Any edits will be lost in future versions.',
-                 '# Num runs in spreadsheet: {}'.format(len(rundata))):
+                 '# Num runs in spreadsheet: {}'.format(len(rundata)),
+                 '# Valid range: read % < 0.5%'):
         worksheet.write(rownum, 0, line)
         rownum += 1
     rownum += 1 # skip row
@@ -346,7 +358,7 @@ def add_barcode_sheet_excel(workbook, wbformat, rundata):
 #                worksheet.write(rownum+k, colnum, '={}({})'.format(calc, runrange),
 #                                wbformat[calcformat])
         worksheet.conditional_format(runrange, {'type':'cell', 
-            'criteria':'>', 'value':LIMIT, 'format':wbformat['red'], })
+            'criteria':'>=', 'value':LIMIT, 'format':wbformat['red'], })
 #        worksheet.conditional_format(runrange, {'type':'cell', 
 #            'criteria':'between', 'minimum': 0.001, 'maximum': LIMIT,
 #               'format':wbformat['ltred'], })
@@ -381,8 +393,8 @@ class StampWaterBarcode_App(wx.App):
 
 class StampFrame(wx.Frame):
     def __init__(self, dbh, msg=None, spreadsheet=None):
-        wx.Frame.__init__(self, None, title="STAMP Water Barcode v{}".format(VERSION), 
-                          size=(550,425))
+        wx.Frame.__init__(self, None, title="STAMP Water Barcode v{}".format(
+                          VERSION), size=(550,425))
         self.dbh = dbh
         self.spreadsheet = spreadsheet
         panel = wx.Panel(self)
@@ -443,10 +455,14 @@ class StampFrame(wx.Frame):
             msg = "    {} runs saved".format(numruns)
             self.notebook.tabOne.ChangeMessage(msg)
             if numruns:
-                self.text.AppendText("  Updating spreadsheet.\n")
-                create_excel_spreadsheet(allrundata, self.spreadsheet)
-                self.text.AppendText(
-                    "      Spreadsheet now contains {} runs\n".format(numruns))
+                try:
+                    self.text.AppendText("  Updating spreadsheet.\n")
+                    create_excel_spreadsheet(allrundata, self.spreadsheet)
+                    self.text.AppendText(
+                        "      Spreadsheet now contains {} runs\n".format(numruns))
+                except Exception, e:
+                    self.text.AppendText("    ERROR: {}{}\n\n".format(
+                                         type(e).__name__, e))
         self.text.AppendText("\n")
 
     def OnCloseMe(self, event):
@@ -581,8 +597,12 @@ class TabPanel_Results(wx.Panel):
         for barcode in info['bc_counts']:
             count = info['bc_counts'][barcode]['count']
             perc = count*100.0/info['total_reads']
-            infostr += '{}: {:8d} reads ({:6.4f}%)\n'.format(
+            infostr += '{}: {:8d} reads ({:6.4f}%)'.format(
                         barcode, count, perc)
+            if perc < LIMIT*100.0: 
+                infostr += '    Good\n'
+            else:
+                infostr += '    Above limit!!!\n'
         infoText = wx.StaticText(self, -1, infostr)
 
         panelSizer = wx.BoxSizer(wx.VERTICAL)
