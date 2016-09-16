@@ -18,8 +18,11 @@ import xlsxwriter
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="1.2"
-BUILD="160713"
+VERSION="1.3"
+BUILD="160916"
+
+# Revisions 160916
+# * Only highlight missing expected variants
 
 # Revisions 160713
 # * Hide unexpected variants
@@ -939,53 +942,19 @@ def add_mutation_sheet_excel(workbook, wbformat, samples, data,
             if d: worksheet.write_number(rownum, colnum+i+skipcalc+1, 
                                          float(d['vaf']))
         runrange = "{1}{0}:{2}{0}".format(rownum+1, runcolxl_s, runcolxl_e)
-#        colnum += 1
-#        worksheet.write(rownum, colnum, '=AVERAGE({})'.format(runrange))
-#        worksheet.write_array_formula(rownum, colnum, rownum, colnum,
-#                        '{'+'=AVERAGE(IF(ISBLANK({0}),0,{0}))'.format(
-#                        runrange)+'}')
-#        colnum += 1
-#        if len(vdat2)>1:
-#            worksheet.write(rownum, colnum, '=STDEV({})'.format(runrange))
-#            worksheet.write_array_formula(rownum, colnum, rownum, colnum,
-#                        '{'+'=STDEV(IF(ISBLANK({0}),0,{0}))'.format(
-#                        runrange)+'}')
         add_avg_stddev_columns(worksheet, rownum, i_col_avg, i_col_std,
                                vdat2, runrange, expecttype)
         colnum += skipcalc
         worksheet.write(rownum, colnum, '=COUNT({})/{}'.format(runrange, 
                         len(samples['good'])), percformat)
-        if expecttype in ('horizon', 'expected'): 
-            if expecttype=='expected':
-                worksheet.set_row(rownum, None, wbformat['gray'])
-            worksheet.conditional_format(runrange, 
-              {'type':'cell', 'criteria':'between', 
-               'minimum':'2*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
-                                                        stdcolxl),
-               'maximum':'3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
-                                                        stdcolxl),
-               'format':wbformat['ltred'], })
-            worksheet.conditional_format(runrange, 
-              {'type':'cell', 'criteria':'>', 
-               'value':'3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
-                                                      stdcolxl),
-               'format':wbformat['red'], })
-            worksheet.conditional_format(runrange, 
-              {'type':'cell', 'criteria':'between', 
-               'minimum':'-2*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
-                                                         stdcolxl),
-               'maximum':'-3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
-                                                         stdcolxl),
-               'format':wbformat['ltblue'], })
-            worksheet.conditional_format(runrange, 
-              {'type':'cell', 'criteria':'<', 
-               'value':'-3*${2}${0} + ${1}${0}'.format(rownum+1, avgcolxl, 
-                                                       stdcolxl),
-               'format':wbformat['blue'], })
+        if expecttype in ('horizon',): 
             worksheet.conditional_format(runrange, {'type':'blanks', 
-                                         'format':wbformat['ltbluepatt'], })
+                                         'format':wbformat['ltred'], })
+        elif expecttype=='expected':
+            worksheet.set_row(rownum, None, wbformat['gray'])
+            worksheet.conditional_format(runrange, {'type':'blanks', 
+                                         'format':wbformat['ltblue'], })
         else: 
-#            wholerow = "A{0}:{1}{0}".format(rownum+1, runcolxl_e)
             worksheet.set_row(rownum, None, wbformat['dkgray'], {'hidden':True})
     worksheet.set_column(i_col_run_s-1, i_col_run_e-1, 10) #set col width
     worksheet.set_column(i_position, i_position, 9)
@@ -1052,11 +1021,14 @@ def add_fusion_sheet_excel(workbook, wbformat, samples, data,
         colnum += 1
         worksheet.write(rownum, colnum, '=COUNTA({})/{}'.format(runrange, 
                         len(samples['good'])), percformat)
-        if expecttype in ('horizon', 'expected'): 
+        if expecttype in ('horizon',): 
             worksheet.conditional_format(runrange, 
               {'type':'blanks', 'format':wbformat['ltred'], })
+        elif expecttype=='expected':
+            worksheet.set_row(rownum, None, wbformat['gray'])
+            worksheet.conditional_format(runrange, 
+              {'type':'blanks', 'format':wbformat['ltblue'], })
         else: 
-#            wholerow = "A{0}:{1}{0}".format(rownum+1, runcolxl_e)
             worksheet.set_row(rownum, None, wbformat['dkgray'], {'hidden':True})
     worksheet.set_column(i_col_run_s-1, i_col_run_e-1, 10) #set col width
     for i in data['hiderows']:
