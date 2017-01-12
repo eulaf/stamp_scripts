@@ -402,7 +402,7 @@ class StampFrame(wx.Frame):
             "Drop barcode_counts.txt file(s) here:")
         self.text = wx.TextCtrl(panel,-1, "",style=wx.TE_READONLY|
                                 wx.TE_MULTILINE|wx.HSCROLL)
-        button_save = wx.Button(panel, -1, "Update spreadsheets and DB")
+        button_save = wx.Button(panel, -1, "Update spreadsheet and DB")
         save_tooltip = "Update spreadsheet and database with data entered.\n"
         button_save.SetToolTip(wx.ToolTip(save_tooltip))
         self.Bind(wx.EVT_BUTTON, self.UpdateSpreadsheetAndDB, button_save)

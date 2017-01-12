@@ -19,12 +19,12 @@ from collections import defaultdict
 from argparse import ArgumentParser
 
 VERSION="1.3"
-BUILD="160916"
+BUILD="170112"
 
-# Revisions 160916
-# * Only highlight missing expected variants
-
-# Revisions 160713
+# REVISION HISTORY
+# 170112 - Fix runnum lstrip to work for STAMP300
+# 160916 - Only highlight missing expected variants
+# 160713
 # * Hide unexpected variants
 # * Add gray background to non-horizon, unexpected variants
 # * Add HD753_stampV2 to CONTROL_LIST
@@ -154,7 +154,7 @@ def group_files_by_sample(inputfiles):
     for infile in infiles:
         fname = os.path.basename(infile).lower()
         control = None
-        if re.search('t[ru]*q.*3', fname):
+        if re.search('t[ru]*q.?3', fname):
             control = 'TruQ3'
         elif re.search('hd.*753', fname):
             control = 'HD753'
@@ -164,7 +164,7 @@ def group_files_by_sample(inputfiles):
         for ext in extensions:
             if infile.endswith(ext):
                 sample = os.path.basename(infile).replace(ext,'')
-                runnum = sample.lstrip('TRUQtruqHDhd753_').lstrip('STAMP')
+                runnum = sample.lstrip('TRUQtruqHDhd753').lstrip('_').lstrip('STAMP')
                 runnum = runnum.split('_')[0]
                 run = "STAMP{}".format(runnum) if runnum else ''
                 samples[sample][extensions[ext]] = infile
