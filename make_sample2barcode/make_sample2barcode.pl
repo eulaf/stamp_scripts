@@ -64,7 +64,11 @@ Print short usage message.
 ### CONSTANTS
 
 my $VERSION = "1.2";
-my $BUILD = "160317";
+my $BUILD = "170217";
+
+## REVISION HISTORY
+# 20170111 - Remove periods from sample names
+# 20170217 - Always remove commas from sample name
 
 #----------------
 
@@ -285,6 +289,7 @@ sub create_sample2barcode {
         my $lab = $$data{lab}{$i} || '';
         my $mrn = $$data{mrn}{$i} || '';
         my $sample;
+        $name =~ s/,/_/g;
         if ($name =~ /^(tr?u?q.?3|molt4|hd753).*$runnum/i) { 
             $sample = $name;
         } elsif ($name =~ /^tr?u?q.?3/i) {
@@ -296,7 +301,6 @@ sub create_sample2barcode {
         } elsif ($lab || $mrn) { #patient name
             # Change name to last name + first initial(s)
             $name =~ s/-//g; #remove hyphens in hyphenated names
-            $name =~ s/,/_/g;
             my ($last, $first) = $name =~ /_/ ? split(/_/, $name, 2) :
                                  split(/\s/, $name, 2);
             unless (defined($first)) { $first = ''; }
@@ -312,7 +316,7 @@ sub create_sample2barcode {
             $sample = $name;
         }
         #remove spaces and non-standard characters
-        $sample =~ s/[\s\x9F-\xFF]//g;
+        $sample =~ s/[\s\.\x9F-\xFF]//g;
         #make sure not to have duplicate names
         if (exists $samplenames{$sample}) {
             $samplenames{$sample}++;
