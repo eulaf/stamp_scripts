@@ -18,10 +18,11 @@ import xlsxwriter
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="1.3"
-BUILD="170112"
+VERSION="1.4"
+BUILD="170418"
 
 # REVISION HISTORY
+# 170418 - Add CNVs to HD753 control qc
 # 170112 - Fix runnum lstrip to work for STAMP300
 # 160916 - Only highlight missing expected variants
 # 160713
@@ -69,11 +70,24 @@ CONTROL_LIST = {'HD753':'HD753', # stampV1
 REFFILE_LIST = {
     "TRUTHFILE": "truths_CONTROL.txt",
     "FUSIONFILE": "truths_fusions_CONTROL.txt",
+    "CNVFILE": "truths_cnvs_CONTROL.txt",
     'SCHEMAFILE': "stampQC_schema.sql",
     'SPREADSHEET': "stampQC_CONTROL.xlsx",
     'SQLITEDB': "stampQC_CONTROL.db",
 }
-VARTYPES = ['mutation', 'fusion']
+VARTYPES = ['mutation', 'fusion', 'cnv']
+FORMAT_VARTYPE = {
+  'format':{
+    'mutation':'mutation',
+    'fusion':'fusion',
+    'cnv':'CNV',
+  },
+  'capitalize':{
+    'mutation':'Mutation',
+    'fusion':'Fusion',
+    'cnv':'CNV',
+  }
+}
 REFS = {}
 
 def check_references(docsdir, datadir, ctrl_version):
@@ -103,11 +117,11 @@ def check_references(docsdir, datadir, ctrl_version):
                 if 'FILE' not in ftype or os.path.isfile(fpath):
                     REFS[ctrl][ftype] = fpath
     if found:
-        sys.stderr.write("Truth files found for:  "+', '.join(found)+'\n')
+        sys.stdout.write("Truth files found for:  "+', '.join(found)+'\n')
     else:
-        sys.stderr.write("No truth files found.\n")
+        sys.stdout.write("No truth files found.\n")
     controls = sorted(REFS)
-    sys.stderr.flush()
+    sys.stdout.flush()
     return controls
 
 def check_existing_dbs(datadir, ctrl_version):
@@ -128,11 +142,11 @@ def check_existing_dbs(datadir, ctrl_version):
                     REFFILE_LIST[ftype].replace('CONTROL',clabel))
                 REFS[ctrl][ftype] = fpath
     if found:
-        sys.stderr.write("DB files found for:  "+', '.join(found)+'\n')
+        sys.stdout.write("DB files found for:  "+', '.join(found)+'\n')
     else:
-        sys.stderr.write("No DB files found.\n")
+        sys.stdout.write("No DB files found.\n")
     controls = sorted(REFS)
-    sys.stderr.flush()
+    sys.stdout.flush()
     return controls
 
 #----fileops.py---------------------------------------------------------------
@@ -140,6 +154,7 @@ def check_existing_dbs(datadir, ctrl_version):
 def group_files_by_sample(inputfiles):
     """HD753 uses both a variant report and fusion report for each sample"""
     extensions = {
+        '.cnvs': 'c_report',
         '.fusions.filtered.txt': 'f_report',
         '.variant_report.txt': 'v_report', }
     samples = defaultdict(dict)
@@ -154,6 +169,10 @@ def group_files_by_sample(inputfiles):
     for infile in infiles:
         fname = os.path.basename(infile).lower()
         control = None
+        if '.tiles.cnv' in fname or '.offtarget.' in fname:
+            # ignore off target and tile cnv files
+            badfiles.append(infile)
+            continue
         if re.search('t[ru]*q.?3', fname):
             control = 'TruQ3'
         elif re.search('hd.*753', fname):
@@ -208,7 +227,7 @@ def field2reportfield(f):
         newf = newf.title() 
     return newf
 
-def parse_tab_file(tabfile, keyfunc=None, fieldfunc=None):
+def parse_tab_file(tabfile, keyfunc=None, fieldfunc=None, requiredfield=None):
     """Parse a tab-delimited file with column headers.  Returns a dict with
        key values:
        'fields': a list of fields in the order they appear in the column header
@@ -226,17 +245,25 @@ def parse_tab_file(tabfile, keyfunc=None, fieldfunc=None):
        keyfunc -- function to create a unique key for each row of data.  The
                supplied function should take a dict as its only argument and
                return a unique key for each data row.
-       fieldfunc -- function to reformat field names from header."""
+       fieldfunc -- function to reformat field names from header.
+       requiredfield -- skip rows where this field is empty.  """
     data = []
     datadict = {}
     with open(tabfile, 'r') as fh:
-        fields = [ fieldfunc(f) if fieldfunc else f for f in \
-                   fh.readline().rstrip('\t\n\r').split("\t") ]
-        for line in fh.readlines():
+        for line in fh:
+            if line.startswith('#'):
+                continue
+            else:
+                fields = [ fieldfunc(f.strip()) if fieldfunc else f.strip() \
+                   for f in line.rstrip('\t\n\r').split("\t") ]
+                break
+        for line in fh:
             if not line.rstrip('\n\r'): 
                 continue
-            vals = line.rstrip('\n\r').split("\t")
-            d = dict(zip(fields, line.rstrip('\n\r').split("\t")))
+            vals = [ v.strip() for v in line.split("\t") ]
+            d = dict(zip(fields, vals))
+            if requiredfield and d.get(requiredfield, '')=='':
+                continue
             d['line'] = line
             data.append(d)
             if keyfunc:
@@ -249,7 +276,7 @@ def parse_tab_file(tabfile, keyfunc=None, fieldfunc=None):
     return tabfileinfo
 
 def parse_truths(truthfile, create_dkey):
-    sys.stderr.write("  Reading truths: {}\n".format(truthfile))
+    sys.stdout.write("  Reading truths: {}\n".format(truthfile))
     truthinfo = parse_tab_file(truthfile, keyfunc=create_dkey)
     return truthinfo
 
@@ -261,19 +288,22 @@ def print_checked_file(vinfo, truthset, outfile):
         tdat = truthset.datadict[vartype]
         summary = vinfo.summary[vartype]
         fields = vinfo.fields[vartype][:] + ['Expected?',]
-        sys.stderr.write("Writing {}\n".format(outfile[vartype]))
+        sys.stdout.write("Writing {}\n".format(outfile[vartype]))
         content = "# Num expected found: {}\n".format(summary['Expected']) +\
                   "# Num not expected: {}\n".format(summary['Unexpected']) +\
                   "# Num not found: {}\n".format(summary['Not found'])
-        sys.stderr.write(content)
+        sys.stdout.write(content)
         content += "\t".join([field2reportfield(f) for f in fields])+"\n"
         with open(outfile[vartype], 'w') as ofh:
             for d in vinfo.data[vartype]:
                 if d['Expected?']=='Expected':
                     dkey = d['dkey']
-                    if tdat[dkey]['HorizonVAF']:
+                    if tdat[dkey].get('HorizonVAF'):
                         d['Expected?'] +=' ({}%)'.format(
                                          tdat[dkey]['HorizonVAF'])
+                    elif tdat[dkey].get('HorizonCopies'):
+                        d['Expected?'] +=' ({} copies)'.format(
+                                         tdat[dkey]['HorizonCopies'])
                 row = [ d[f] for f in fields ]
                 content += "\t".join([ str(r) for r in row ])+"\n"
             ofh.write(content)
@@ -301,12 +331,12 @@ def results_as_dict(cursor):
     return data
 
 def connect_db(dbfile):
-    sys.stderr.write("  Connecting to db {}\n".format(dbfile))
+    sys.stdout.write("  Connecting to db {}\n".format(dbfile))
     dbh = sqlite3.connect(dbfile)
     return dbh
 
 def add_schema(dbh, schemafile):
-    sys.stderr.write("  Reading schema {}\n".format(schemafile))
+    sys.stdout.write("  Reading schema {}\n".format(schemafile))
     with open(schemafile, 'r') as fh:
         schema = ' '.join(fh.readlines())
         dbh.executescript(schema)
@@ -324,7 +354,77 @@ def save_variants(cursor, dbtable, data, fields, is_expected=0):
         mut = [ row[f] if f in row else None for f in flist ]
         mut.append(current_time())
         cursor.execute(ins_sql, mut)
-    sys.stderr.flush()
+    sys.stdout.flush()
+
+def save_sample(cursor, run_name, sample_name, status):
+    cursor.execute("INSERT INTO sample (sample_name, run_name, "+\
+                   "sample_status, last_modified) VALUES (?,?,?,?)", 
+                   (sample_name, run_name, status, current_time()))
+
+def update_sample(cursor, run_name, sample_name, status):
+    sys.stdout.write("  Updating run/sample {}, {}, status={}\n".format(
+                     run_name, sample_name, status))
+    cursor.execute("UPDATE sample SET sample_status=?, last_modified=?"+\
+                   " WHERE run_name=? AND sample_name=?",
+                   (status, current_time(), run_name, sample_name))
+
+def get_sample(cursor, run, sample):
+    samples = get_samples(cursor, run, sample)
+    return samples[0] if samples else None
+    
+def get_samples(cursor, run=None, sample=None, vartype=None):
+    cmd = "SELECT s.* FROM sample s"
+    where = []
+    args = []
+    groupby = []
+    if vartype and vartype in VARTYPES:
+        cmd += ', sample_{} v'.format(vartype)
+        where.append("s.id=v.sample_id")
+        groupby.append("s.id")
+    if run:
+        where.append("s.run_name=?")
+        args.append(run)
+    if sample:
+        where.append("s.sample_name=?")
+        args.append(sample)
+    if where:
+        cmd += " WHERE " + " AND ".join(where)
+    if groupby:
+        cmd += " GROUP BY " + ", ".join(groupby)
+    cursor.execute(cmd, args)
+    results = results_as_dict(cursor)
+    return results
+    
+def get_num_variants_missing(cursor, sample_id, vartype):
+    cmd = """SELECT count(*) FROM {0} v WHERE v.is_expected=1
+          AND v.id NOT IN (SELECT sm.{0}_id FROM sample_{0} sm 
+          WHERE sm.sample_id=?)""".format(vartype)
+    cursor.execute(cmd, [sample_id,])
+    ans = cursor.fetchone()
+    return ans[0] if ans else None
+
+def get_num_variants_unexpected(cursor, sample_id, vartype):
+    cmd = "SELECT count(*) FROM {0} v, sample_{0} sv ".format(vartype)+\
+          " WHERE v.id=sv.{}_id AND v.is_expected=0".format(vartype)+\
+          " AND sv.sample_id=?"
+    cursor.execute(cmd, [sample_id,])
+    ans = cursor.fetchone()
+    return ans[0] if ans else None
+
+def update_sample_counts(cursor, sample_id):
+    vals = [sample_id, sample_id]
+    for vartype in ('mutation', 'fusion'):
+        vals.append(get_num_variants_missing(cursor, sample_id, vartype))
+        vals.append(get_num_variants_unexpected(cursor, sample_id, vartype))
+    cmd = "UPDATE sample SET num_mutations="+\
+          "(SELECT COUNT(*) FROM sample_mutation WHERE sample_id=?),"+\
+          " num_fusions="+\
+          "(SELECT COUNT(*) FROM sample_fusion WHERE sample_id=?),"+\
+          " num_mutations_missing=?, num_mutations_unexpected=?, "+\
+          " num_fusions_missing=?, num_fusions_unexpected=?"+\
+          " WHERE sample.id=?"
+    vals.append(sample_id)
+    cursor.execute(cmd, vals)
 
 def get_mutation(cursor, gene, pos, ref, var, debug=False):
     muts = get_mutations(cursor, gene, pos, ref, var, debug)
@@ -382,68 +482,23 @@ def get_fusions(cursor, region1=None, region2=None, break1=None, break2=None,
     results = results_as_dict(cursor)
     return results
 
-def save_sample(cursor, run_name, sample_name, status):
-    cursor.execute("INSERT INTO sample (sample_name, run_name, "+\
-                   "sample_status, last_modified) VALUES (?,?,?,?)", 
-                   (sample_name, run_name, status, current_time()))
-
-def update_sample(cursor, run_name, sample_name, status):
-    sys.stderr.write("  Updating run/sample {}, {}, status={}\n".format(
-                     run_name, sample_name, status))
-    cursor.execute("UPDATE sample SET sample_status=?, last_modified=?"+\
-                   " WHERE run_name=? AND sample_name=?",
-                   (status, current_time(), run_name, sample_name))
-
-def get_sample(cursor, run, sample):
-    samples = get_samples(cursor, run, sample)
-    return samples[0] if samples else None
+def get_cnv(cursor, gene, debug=False):
+    cnvs = get_cnvs(cursor, gene, debug)
+    return cnvs[0] if cnvs else None
     
-def get_samples(cursor, run=None, sample=None):
-    cmd = "SELECT * FROM sample"
+def get_cnvs(cursor, gene=None, debug=False):
+    cmd = "SELECT * FROM cnv"
     where = []
     args = []
-    if run:
-        where.append("run_name=?")
-        args.append(run)
-    if sample:
-        where.append("sample_name=?")
-        args.append(sample)
+    if gene:
+        where.append("gene=?")
+        args.append(gene)
     if where:
         cmd += " WHERE " + " AND ".join(where)
+    if debug: print "cmd {} ({})".format(cmd, args)
     cursor.execute(cmd, args)
     results = results_as_dict(cursor)
     return results
-    
-def get_num_variants_missing(cursor, sample_id, vartype):
-    cmd = """SELECT count(*) FROM {0} v WHERE v.is_expected=1
-          AND v.id NOT IN (SELECT sm.{0}_id FROM sample_{0} sm 
-          WHERE sm.sample_id=?)""".format(vartype)
-    cursor.execute(cmd, [sample_id,])
-    ans = cursor.fetchone()
-    return ans[0] if ans else None
-
-def get_num_variants_unexpected(cursor, sample_id, vartype):
-    cmd = "SELECT count(*) FROM {0} v, sample_{0} sv ".format(vartype)+\
-          " WHERE v.id=sv.{}_id AND v.is_expected=0".format(vartype)+\
-          " AND sv.sample_id=?"
-    cursor.execute(cmd, [sample_id,])
-    ans = cursor.fetchone()
-    return ans[0] if ans else None
-
-def update_sample_counts(cursor, sample_id):
-    vals = [sample_id, sample_id]
-    for vartype in ('mutation', 'fusion'):
-        vals.append(get_num_variants_missing(cursor, sample_id, vartype))
-        vals.append(get_num_variants_unexpected(cursor, sample_id, vartype))
-    cmd = "UPDATE sample SET num_mutations="+\
-          "(SELECT COUNT(*) FROM sample_mutation WHERE sample_id=?),"+\
-          " num_fusions="+\
-          "(SELECT COUNT(*) FROM sample_fusion WHERE sample_id=?),"+\
-          " num_mutations_missing=?, num_mutations_unexpected=?, "+\
-          " num_fusions_missing=?, num_fusions_unexpected=?"+\
-          " WHERE sample.id=?"
-    vals.append(sample_id)
-    cursor.execute(cmd, vals)
 
 def save_sample_mutation(cursor, sample_id, d, fields, debug=False):
     mut = get_mutation(cursor, d['gene'], d['position'], d['ref'], d['var'])
@@ -517,6 +572,40 @@ def get_all_sample_fusions(cursor):
     results = results_as_dict(cursor)
     return results
 
+def save_sample_cnv(cursor, sample_id, d, fields, debug=False):
+    cnv = get_cnv(cursor, d['gene'], )
+    if debug: print "\nd{}\ncnv {}".format(d, cnv)
+    if not cnv: # cnv not in db, so save
+        save_variants(cursor, 'cnv', [d,], fields)
+        cnv = get_cnv(cursor, d['gene'], debug=debug)
+    ins_sql = 'INSERT INTO sample_cnv (sample_id, cnv_id, mcopies, '+\
+              'status, last_modified) VALUES (?,?,?,?,?)'
+    vals = [ d[f] if f in d else None for f in ('mcopies', 'status') ]
+    vals.append(current_time())
+    cursor.execute(ins_sql, ([sample_id, cnv['id'],]+vals))
+
+def delete_sample_cnvs(cursor, sample_id):
+    cursor.execute("DELETE FROM sample_cnv WHERE sample_id=?", 
+                   (sample_id,))
+
+def get_sample_cnvs(cursor, sample_id, sample_status=None):
+    cmd = "SELECT * FROM sample_cnv v, cnv c, sample s ON "+\
+          "v.cnv_id=c.id AND v.sample_id=s.id WHERE v.sample_id=?" 
+    args = [sample_id,]
+    if sample_status:
+        cmd += " AND s.sample_status=?"
+        args.append(sample_status)
+    cursor.execute(cmd, args)
+    results = results_as_dict(cursor)
+    return results
+
+def get_all_sample_cnvs(cursor):
+    cmd = "SELECT * FROM sample_cnv v, cnv c, sample s ON "+\
+          "v.cnv_id=c.id AND v.sample_id=s.id" 
+    cursor.execute(cmd)
+    results = results_as_dict(cursor)
+    return results
+
 #-----------------------------------------------------------------------------
 
 def mut_key(d):
@@ -527,6 +616,11 @@ def mut_key(d):
 def fusion_key(d):
     """Unique key for fusions"""
     vals = [ d['region1'], d['region2'], d['break1'], d['break2'] ]
+    return '::'.join([str(v) for v in vals])
+
+def cnv_key(d):
+    """Unique key for cnvs"""
+    vals = [ d['gene'], d['locus'] ]
     return '::'.join([str(v) for v in vals])
 
 
@@ -542,6 +636,7 @@ class TruthSet:
         self.dkey = {
             'mutation': mut_key,
             'fusion': fusion_key,
+            'cnv': cnv_key,
         }
         self.data = {}
         self.datadict = {}
@@ -582,14 +677,13 @@ class TruthSet:
             ', (SELECT COUNT(*) FROM sample WHERE sample_status=?)'*2 +\
             ' FROM sample', ['PASS', 'FAIL'])
         ans = cursor.fetchone()
-        msgs.append("    {} runs stored ({} good)\n".format(ans[0],
-                    ans[1]))#, ans[2]))
+        msgs.append("    {} runs\n".format(ans[1],))
         cursor.execute('SELECT COUNT(*) FROM mutation WHERE is_expected=1')
         ans = cursor.fetchone()
         msgs.append("    {} expected mutations\n".format(ans[0]))
         cursor.execute('SELECT COUNT(*) FROM mutation WHERE is_expected=0')
         ans = cursor.fetchone()
-        msgs.append("    {} unexpected mutations\n".format(ans[0]))
+        msgs.append("    {} other mutations\n".format(ans[0]))
 #        cursor.execute('SELECT COUNT(*) FROM sample_mutation')
 #        ans = cursor.fetchone()
 #        msgs.append("  {} total mutations\n".format(ans[0]))
@@ -600,10 +694,18 @@ class TruthSet:
                         '' if ans[0]==1 else 's'))
             cursor.execute('SELECT COUNT(*) FROM fusion WHERE is_expected=0')
             ans = cursor.fetchone()
-            msgs.append("    {} unexpected fusions\n".format(ans[0]))
+            msgs.append("    {} other fusions\n".format(ans[0]))
 #            cursor.execute('SELECT COUNT(*) FROM sample_fusion')
 #            ans = cursor.fetchone()
 #            msgs.append("  {} total fusions\n".format(ans[0]))
+        if self.has_vartype('cnv'):
+            cursor.execute('SELECT COUNT(*) FROM cnv WHERE is_expected=1')
+            ans = cursor.fetchone()
+            msgs.append("    {} expected CNV{}\n".format(ans[0],
+                        '' if ans[0]==1 else 's'))
+            cursor.execute('SELECT COUNT(*) FROM cnv WHERE is_expected=0')
+            ans = cursor.fetchone()
+            msgs.append("    {} other CNVs\n".format(ans[0]))
         return msgs
     
 class VariantSet:
@@ -623,17 +725,18 @@ class VariantSet:
         return True if vartype in self.data and self.data[vartype] else False
 
     def add_variants(self, vfile, vartype):
-        sys.stderr.write("  Reading {} report: {}\n".format(vartype, vfile))
+        sys.stdout.write("  Reading {} report: {}\n".format(vartype, vfile))
         create_dkey = self.truthset.dkey[vartype]
+        requiredfield = 'status' if vartype=='cnv' else None
         vinfo = parse_tab_file(vfile, keyfunc=create_dkey, 
-                               fieldfunc=field2dbfield)
+                fieldfunc=field2dbfield, requiredfield=requiredfield)
         if vartype=='mutation':
             massage_data(vinfo['data'])
         self.data[vartype] = vinfo['data']
         self.datadict[vartype] = vinfo['datadict']
         self.fields[vartype] = vinfo['fields']
         numvar = len(vinfo['data'])
-        sys.stderr.write("    {} {}s\n".format(numvar, vartype))
+        sys.stdout.write("    {} {}s\n".format(numvar, vartype))
         self.vartypes.append(vartype)
         return vinfo
 
@@ -663,16 +766,16 @@ class VariantSet:
             summary['notseen'] = notseen
             tot_notfound += summary['Not found']
             if notseen:
-                sys.stderr.write("    {}s not found: {}\n".format(
-                    vartype.capitalize(), ", ".join(notseen)))
+                sys.stdout.write("    {}s not found: {}\n".format(
+                    FORMAT_VARTYPE['capitalize'][vartype], ", ".join(notseen)))
 #                if len(notseen) > summary['Expected']: 
 #                    self.summary['Status'] = 'FAIL'
 #                    sys.stderr.write("Status: FAIL {} > {}\n".format(
 #                        len(notseen), summary['Expected']))
             else:
-                sys.stderr.write("    All expected {}s found\n".format(vartype))
+                sys.stdout.write("    All expected {}s found\n".format(vartype))
         if tot_notfound==0:
-            sys.stderr.write("  All expected variants found\n")
+            sys.stdout.write("  All expected variants found\n")
         return self.summary
 
     def save2db(self, status, force=False):
@@ -692,13 +795,14 @@ class VariantSet:
         sample = get_sample(cursor, runname, sampname)
         if force or not sample:
             if sample and force:
-                sys.stderr.write('  Deleting old data for {}:{} in db.\n'.format(
+                sys.stdout.write('  Deleting old data for {}:{} in db.\n'.format(
                                  runname, sampname))
                 update_sample(cursor, runname, sampname, status)
                 delete_sample_mutations(cursor, sample['id'])
                 delete_sample_fusions(cursor, sample['id'])
+                delete_sample_cnvs(cursor, sample['id'])
             elif not sample:
-                sys.stderr.write('  Saving sample {}:{} in db.\n'.format(
+                sys.stdout.write('  Saving sample {}:{} in db.\n'.format(
                                  runname, sampname))
                 save_sample(cursor, runname, sampname, status)
                 sample = get_sample(cursor, runname, sampname)
@@ -707,20 +811,23 @@ class VariantSet:
                 if vartype=='fusion':
                     for d in vdata:
                         save_sample_fusion(cursor, sample['id'], d, fields)
+                elif vartype=='cnv':
+                    for d in vdata:
+                        save_sample_cnv(cursor, sample['id'], d, fields)
                 else:
                     for d in vdata:
                         save_sample_mutation(cursor, sample['id'], d, fields)
             update_sample_counts(cursor, sample['id'])
             self.dbh.commit()
         vafs = get_sample_mutations(cursor, sample['id'])
-        sys.stderr.write('    Have {} mutations for sample {}:{} in db.\n'.\
+        sys.stdout.write('    Have {} mutations for sample {}:{} in db.\n'.\
                          format(len(vafs), runname, sampname))
-        sys.stderr.flush()
+        sys.stdout.flush()
         return 1
 
 
 def check_db(ctrl):
-    sys.stderr.write("\n{}: checking db\n".format(ctrl))
+    sys.stdout.write("\n{}: checking db\n".format(ctrl))
     dbfile = REFS[ctrl]['SQLITEDB']
     is_new_db = not os.path.exists(dbfile)
     dbh = connect_db(dbfile)
@@ -730,7 +837,7 @@ def check_db(ctrl):
         add_schema(dbh, REFS[ctrl]['SCHEMAFILE'])
         msgs.append("  Saving truths\n")
         tinfo = parse_truths(REFS[ctrl]['TRUTHFILE'], mut_key)
-        sys.stderr.write("    {} mutations\n".format(len(tinfo['data'])))
+        sys.stdout.write("    {} mutations\n".format(len(tinfo['data'])))
         save_variants(cursor, 'mutation', tinfo['data'], tinfo['fields'])
         dbh.commit()
         cursor.execute('SELECT COUNT(*) FROM mutation')
@@ -738,7 +845,7 @@ def check_db(ctrl):
                     cursor.fetchone()[0], 'mutation'))
         if 'FUSIONFILE' in REFS[ctrl]:
             finfo = parse_truths(REFS[ctrl]['FUSIONFILE'], fusion_key)
-            sys.stderr.write("    {} fusions\n".format(len(finfo['data'])))
+            sys.stdout.write("    {} fusions\n".format(len(finfo['data'])))
             save_variants(cursor, 'fusion', finfo['data'], finfo['fields'])
             dbh.commit()
             cursor.execute('SELECT COUNT(*) FROM fusion')
@@ -747,11 +854,22 @@ def check_db(ctrl):
             tinfo['fusion_data'] = finfo['data']
             tinfo['fusion_fields'] = finfo['fields']
             tinfo['fusion_datadict'] = finfo['datadict']
+        if 'CNVFILE' in REFS[ctrl]:
+            cinfo = parse_truths(REFS[ctrl]['CNVFILE'], cnv_key)
+            sys.stdout.write("    {} CNVs\n".format(len(cinfo['data'])))
+            save_variants(cursor, 'cnv', cinfo['data'], cinfo['fields'])
+            dbh.commit()
+            cursor.execute('SELECT COUNT(*) FROM cnv')
+            msgs.append("    {} rows inserted into {}\n".format(
+                    cursor.fetchone()[0], 'cnv'))
+            tinfo['cnv_data'] = cinfo['data']
+            tinfo['cnv_fields'] = cinfo['fields']
+            tinfo['cnv_datadict'] = cinfo['datadict']
 #    else:
 #        tinfo = truths_from_db(cursor)
 #        msgs = db_summary(cursor)
-        sys.stderr.write(''.join(msgs))
-        sys.stderr.flush()
+        sys.stdout.write(''.join(msgs))
+        sys.stdout.flush()
     return dbh
 
 
@@ -808,6 +926,37 @@ def fusion_sheet_data(ctrl, dbh, samples, tfields):
             else:
                 vdict = data['not_expected']
                 dkey = int(d['fusion_id']) # sort by order in db
+            vdict[dkey][d['sample_name']] = d
+    numexpected = len(data['expected']) + len(data['horizon'])
+    data['header'] = [ "# This spreadsheet is automatically generated." +\
+           " Any edits will be lost in future versions.", ] +\
+           [ "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
+           "# Num expected variants: {}".format(numexpected), ]
+    data['fields'] = tfields[:]
+    if 'is_expected' in data['fields']: 
+        data['fields'].remove('is_expected')
+    return data
+
+def cnv_sheet_data(ctrl, dbh, samples, tfields):
+    allcnvs = get_all_sample_cnvs(dbh.cursor())
+    if not allcnvs:
+        return None
+    data = { 'title': ctrl+' CNVs',
+             'hiderows': [0, ],
+             'expected':defaultdict(dict), 
+             'horizon':defaultdict(dict), 
+             'not_expected':defaultdict(dict) }
+    for d in allcnvs:
+        if not d['sample_status']=='FAIL':
+            if d['HorizonCopies'] and d['is_expected']:
+                vdict = data['horizon']
+                dkey = int(d['cnv_id']) # sort by order in db
+            elif d['is_expected']:
+                vdict = data['expected']
+                dkey = int(d['cnv_id']) # sort by order in db
+            else:
+                vdict = data['not_expected']
+                dkey = int(d['cnv_id']) # sort by order in db
             vdict[dkey][d['sample_name']] = d
     numexpected = len(data['expected']) + len(data['horizon'])
     data['header'] = [ "# This spreadsheet is automatically generated." +\
@@ -1039,30 +1188,123 @@ def add_fusion_sheet_excel(workbook, wbformat, samples, data,
     return {'num_runs':numruns, 'num_samples':numsamples, 
             'num_variants':numvariants}
 
+def add_cnv_sheet_excel(workbook, wbformat, samples, data, fieldfunc=None):
+    worksheet = workbook.add_worksheet(data['title'])
+    rownum = 0
+    # comment lines
+    for line in data['header']:
+        worksheet.write(rownum, 0, line)
+        rownum += 1
+    # print column names
+    rownum += 1 # skip row for run names
+    for colnum, f in enumerate(data['fields']):
+        colname = fieldfunc(f) if fieldfunc else f
+        worksheet.write(rownum, colnum, colname, wbformat['bold'])
+    calc_fields = ['AverageCopies', 'StddevCopies', '%Detection']
+    i_col_avg = colnum+1
+    i_col_std = colnum+2
+    for f in calc_fields:
+        colnum += 1
+        worksheet.write(rownum, colnum, f, wbformat['bold'])
+    i_col_run_s = colnum + 1
+    for r, s in zip(samples['runs'], samples['good']):
+        colnum += 1
+        worksheet.write(rownum-1, colnum, r, wbformat['bold'])
+        worksheet.write(rownum, colnum, s, wbformat['bold'])
+    i_freeze = rownum+1
+    i_col_run_e = colnum
+    runcolxl_s = convert_to_excel_col(i_col_run_s)
+    runcolxl_e = convert_to_excel_col(i_col_run_e)
+    avgcolxl = convert_to_excel_col(i_col_avg)
+    stdcolxl = convert_to_excel_col(i_col_std)
+    i_horizonCopies = data['fields'].index('HorizonCopies')
+    # print data by row/mutation, expected first
+    numvariants = 0
+    for expecttype in ('horizon', 'expected', 'not_expected'):
+      percformat=wbformat['perc'] if expecttype=='horizon' else\
+                 wbformat['gray_perc']
+      if expecttype=='not_expected':
+          percformat=wbformat['dkgray_perc']
+      for sortkey in sorted(data[expecttype]):
+        numvariants += 1
+        rownum += 1
+        vdat = [ data[expecttype][sortkey][sample] if sample \
+               in data[expecttype][sortkey] else None \
+               for sample in samples['good'] ] 
+        vdat2 = [ d for d in vdat if d ] # dicts with data only
+        for colnum, f in enumerate(data['fields']):
+            v = vdat2[0][f] if f in vdat2[0] else ''
+            if colnum == i_horizonCopies: # format as number
+                if v:
+                  worksheet.write_number(rownum, colnum, v)
+#            elif colnum == i_horizonCopies: # format as number/percent
+#                if v: 
+#                    worksheet.write(rownum, colnum, v/100, percformat)
+            else:
+                worksheet.write(rownum, colnum, v)
+        skipcalc = len(calc_fields)
+        for i, d in enumerate(vdat):
+            if d: worksheet.write_number(rownum, colnum+i+skipcalc+1, 
+                                         float(d['mcopies']))
+        runrange = "{1}{0}:{2}{0}".format(rownum+1, runcolxl_s, runcolxl_e)
+        add_avg_stddev_columns(worksheet, rownum, i_col_avg, i_col_std,
+                               vdat2, runrange, expecttype)
+        colnum += skipcalc
+        worksheet.write(rownum, colnum, '=COUNT({})/{}'.format(runrange, 
+                        len(samples['good'])), percformat)
+        if expecttype in ('horizon',): 
+            worksheet.conditional_format(runrange, {'type':'blanks', 
+                                         'format':wbformat['ltred'], })
+        elif expecttype=='expected':
+            worksheet.set_row(rownum, None, wbformat['gray'])
+            worksheet.conditional_format(runrange, {'type':'blanks', 
+                                         'format':wbformat['ltblue'], })
+        else: 
+            worksheet.set_row(rownum, None, wbformat['dkgray'], {'hidden':True})
+    worksheet.set_column(i_col_run_s-1, i_col_run_e-1, 10) #set col width
+#    worksheet.set_column(i_position, i_position, 9)
+    for i in data['hiderows']:
+        worksheet.set_row(i, None, None, {'hidden': True})
+    worksheet.freeze_panes(i_freeze, 0)
+    numruns = len(samples['runs'])
+    numsamples = len(samples['good'])
+    return {'num_runs':numruns, 'num_samples':numsamples, 
+            'num_variants':numvariants}
+
 def generate_excel_spreadsheet(ctrl, dbh, tfields, outfile):
-    all_samples = get_samples(dbh.cursor())
-    samples = { 'failed': [], 'good': [], 'runs': [] }
-    for d in sorted(all_samples, reverse=True, key=lambda d: \
-            "%-10s %s" % (d['run_name'], d['sample_name'])):
-        if d['sample_status']=='FAIL':
-            samples['failed'].append(d['sample_name'])
-        else:
-            samples['good'].append(d['sample_name'])
-            samples['runs'].append(d['run_name'])
-    mutdata = mutation_sheet_data(ctrl, dbh, samples, tfields['mutation'])
-    fusiondata = fusion_sheet_data(ctrl, dbh, samples, tfields['fusion'])
-    sys.stderr.write("\nCreating {} Excel file:\n{}\n".format(
-                     ctrl, outfile))
+    compile_sheet_data = { 'mutation': mutation_sheet_data,
+                           'fusion': fusion_sheet_data, 
+                           'cnv': cnv_sheet_data, }
+    add_sheet_excel = { 'mutation': add_mutation_sheet_excel, 
+                        'fusion': add_fusion_sheet_excel, 
+                        'cnv': add_cnv_sheet_excel, }
+    sys.stdout.write("\nCreating {} Excel file:\n{}\n".format(ctrl, outfile))
     workbook = xlsxwriter.Workbook(outfile)
     wbformat = add_formats_to_workbook(workbook)
-    nums = add_mutation_sheet_excel(workbook, wbformat, samples, mutdata,
-                                    fieldfunc=field2reportfield) 
-    if fusiondata:
-        nums = add_fusion_sheet_excel(workbook, wbformat, samples, 
-                          fusiondata, fieldfunc=field2reportfield) 
+    for vartype in VARTYPES:
+        all_samples = get_samples(dbh.cursor(), vartype=vartype)
+        samples = { 'failed': [], 'good': [], 'runs': [] }
+        for d in sorted(all_samples, reverse=True, key=lambda d: \
+              "%-10s %s" % (d['run_name'], d['sample_name'])):
+            if d['sample_status']=='FAIL':
+                samples['failed'].append(d['sample_name'])
+            else:
+                samples['good'].append(d['sample_name'])
+                samples['runs'].append(d['run_name'])
+        data = compile_sheet_data[vartype](ctrl, dbh, samples, tfields[vartype])
+        if data and (data.get('horizon') or data.get('expected')):
+            nums = add_sheet_excel[vartype](workbook, wbformat, samples, data, 
+                   fieldfunc=field2reportfield) 
+#    if data.get('fusion') and (data['fusion'].get('expected') or data['fusion'].get('horizon')):
+#        nums = add_fusion_sheet_excel(workbook, wbformat, samples['fusion'], 
+#               data['fusion'], fieldfunc=field2reportfield) 
+#    if data.get('cnv') and (data['cnv'].get('horizon') or data['cnv'].get('expected')):
+#        nums = add_cnv_sheet_excel(workbook, wbformat, samples['cnv'], 
+#               data['cnv'], fieldfunc=field2reportfield) 
     workbook.close()
     wb = openpyxl.load_workbook(outfile)
     wb.save(outfile)
+    sys.stdout.flush()
     return nums
 
 #----gui.py-------------------------------------------------------------------
@@ -1095,7 +1337,7 @@ class StampFrame(wx.Frame):
 
         panel = wx.Panel(self)
         label = wx.StaticText(panel, -1, 
-            "Drop TruQ3 or HD753 variant or fusion reports here:")
+            "Drop TruQ3 or HD753 variant, fusion, or CNV reports here:")
         self.text = wx.TextCtrl(panel,-1, "",style=wx.TE_READONLY|
                                 wx.TE_MULTILINE|wx.HSCROLL)
         button_print = wx.Button(panel, -1, "Print reports")
@@ -1145,6 +1387,9 @@ class StampFrame(wx.Frame):
                                       ".checked.txt"
             if 'fusion_file' in info:
                 outfile['fusion'] = info['fusion_file'].replace('.txt','') +\
+                                    ".checked.txt"
+            if 'cnv_file' in info:
+                outfile['cnv'] = info['cnv_file'].replace('.txt','') +\
                                     ".checked.txt"
             for vartype in outfile:
                 if not sample==info['sample']:
@@ -1239,7 +1484,7 @@ class VariantReportDrop(wx.FileDropTarget):
             if sample in oldsamples2files:
                 updatesample = False
                 old_d = oldsamples2files[sample]
-                for reporttype in ('v_report', 'f_report'):
+                for reporttype in ('v_report', 'f_report', 'c_report'):
                     if reporttype in d:
                         if reporttype in old_d and \
                            old_d[reporttype]==d[reporttype]:
@@ -1272,6 +1517,11 @@ class VariantReportDrop(wx.FileDropTarget):
                     vinfo.add_variants(d['f_report'], 'fusion')
                     self.window.AppendText("Fusion file {}:    {}\n".format(
                         self.num_samples, info['fusion_file']))
+                if 'c_report' in d:
+                    info['cnv_file'] = d['c_report']
+                    vinfo.add_variants(d['c_report'], 'cnv')
+                    self.window.AppendText("CNV file {}:    {}\n".format(
+                        self.num_samples, info['cnv_file']))
                 summary = vinfo.compare_variants()
                 info.update({'summary': summary, 
                              'status': summary['Status'],})
@@ -1287,7 +1537,7 @@ class VariantReportDrop(wx.FileDropTarget):
 
 class StampNotebook(fnb.FlatNotebook):
     def __init__(self, parent, tinfo, controls, msg=None):
-        fnb.FlatNotebook.__init__(self, parent, id=wx.ID_ANY, size=(500, 270),
+        fnb.FlatNotebook.__init__(self, parent, id=wx.ID_ANY, size=(500, 300),
             agwStyle=fnb.FNB_VC8|fnb.FNB_X_ON_TAB|fnb.FNB_NO_X_BUTTON|
             fnb.FNB_NAV_BUTTONS_WHEN_NEEDED)
 
@@ -1315,7 +1565,6 @@ class StampNotebook(fnb.FlatNotebook):
         res = self.results.pop(selected)
         ent = self.entries.pop(selected)
         txt = self.GetPageText(selected)
-        sys.stderr.flush()
 
     def OnTabDrop(self, event):
         selected = self.GetSelection()
@@ -1334,6 +1583,8 @@ class StampNotebook(fnb.FlatNotebook):
                 reports.append(info['file'])
             if 'fusion_file' in info:
                 reports.append(info['fusion_file'])
+            if 'cnv_file' in info:
+                reports.append(info['cnv_file'])
         return reports
 
     def DeletePageSample(self, sample):
@@ -1389,9 +1640,10 @@ class TabPanel_Results(wx.Panel):
             else:
                 infostr2 += "All expected {}s found\n".format(vartype)
             infostr2 += '\n\n'
-            infostr1 += "Total {}s:{:9d}\n".format(vartype, summary['Total'])\
-            +"    Expected {}:{:8d}\n".format(vartype, summary['Expected'])+\
-            "    Unexpected {}:{:4d}\n".format(vartype, summary['Unexpected'])
+            varname = FORMAT_VARTYPE['format'][vartype]
+            infostr1 += "Total {}s:{:9d}\n".format(varname, summary['Total'])\
+            +"    Expected {}s:{:8d}\n".format(varname, summary['Expected'])+\
+            "    Other {}s:{:4d}\n".format(varname, summary['Unexpected'])
 #        info2summ = "Missing {} expected variants\n".format(num_missing) \
 #               if num_missing else 'All expected variants found.\n'
         infoText1 = wx.StaticText(self, -1, infostr1)
@@ -1457,6 +1709,7 @@ if __name__=='__main__':
     msgs = []
     # Use STAMP V2 data if V2 in name of script
     ctrl_version = get_ctrl_version()
+    sys.stdout.write("Control version: {}\n".format(ctrl_version))
     check_references(args.docsdir, args.datadir, ctrl_version)
     controls = check_existing_dbs(args.datadir, ctrl_version)
     for ctrl in controls:
@@ -1464,7 +1717,7 @@ if __name__=='__main__':
         tinfo[ctrl] = TruthSet(ctrl, dbh[ctrl], ctrl_version)
         summary = tinfo[ctrl].db_summary()
         msgs.append(''.join(summary))
-    sys.stderr.write('\n'.join(msgs))
+    sys.stdout.write('\n'.join(msgs))
     if len(args.reports)==0:
         run_gui(dbh, tinfo, msgs, controls)
     else:
@@ -1476,7 +1729,7 @@ if __name__=='__main__':
         for sample, d in sorted(samples2files.items()):
             run = d['run']
             ctrl = d['control']
-            sys.stderr.write("\nSample: {}\tRun: {}\tControl: {}\n".format(
+            sys.stdout.write("\nSample: {}\tRun: {}\tControl: {}\n".format(
                              sample, run, ctrl))
             vinfo = VariantSet(sample, run, ctrl, tinfo[ctrl])
             if 'v_report' in d:
@@ -1487,6 +1740,10 @@ if __name__=='__main__':
                 outfile['fusion'] = d['f_report'].replace('.txt','')+\
                                       ".checked.txt"
                 vinfo.add_variants(d['f_report'], 'fusion')
+            if 'c_report' in d:
+                outfile['cnv'] = d['c_report'].replace('.txt','')+\
+                                      ".checked.txt"
+                vinfo.add_variants(d['c_report'], 'cnv')
             summary = vinfo.compare_variants(args.status)
             vinfo.save2db(summary['Status'], args.force)
             if args.text:

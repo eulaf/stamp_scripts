@@ -31,6 +31,17 @@ create table fusion (
 create unique index fusion_index on fusion 
     (region1, region2, break1, break2);
 
+create table cnv (
+    id    INTEGER    PRIMARY KEY    AUTOINCREMENT, 
+	gene    TEXT, 
+	locus    TEXT, 
+	HorizonCopies    REAL, 
+	is_expected    INTEGER, 
+	last_modified    TIMESTAMP
+);
+
+create unique index cnv_index on cnv (gene);
+
 create table sample(
     id    INTEGER    PRIMARY KEY    AUTOINCREMENT,
     sample_name    TEXT,
@@ -61,5 +72,14 @@ create table sample_fusion(
     fusion_id    INTEGER,
 	last_modified    TIMESTAMP,
     PRIMARY KEY(sample_id, fusion_id)
+);
+
+create table sample_cnv(
+    sample_id    INTEGER,
+    cnv_id    INTEGER,
+    mcopies    REAL,
+    status    TEXT,
+	last_modified    TIMESTAMP,
+    PRIMARY KEY(sample_id, cnv_id)
 );
 

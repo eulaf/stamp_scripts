@@ -1,0 +1,4 @@
+gene	locus	HorizonCopies	is_expected
+MYC	8q	9.8	1
+MYCN	2p	9.5	1
+MET	7q	4.5	0
