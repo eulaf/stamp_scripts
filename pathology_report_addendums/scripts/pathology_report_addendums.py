@@ -21,13 +21,19 @@ import docx
 import wx
 import wx.richtext 
 
-VERSION="1.0"
-BUILD="170316"
-
-#----common.py----------------------------------------------------------------
+VERSION="1.1"
+BUILD="170425"
 
 def getScriptPath():
   return os.path.dirname(os.path.realpath(sys.argv[0]))
+
+#----constants----------------------------------------------------------------
+
+PROJ_DIR = os.path.abspath(os.path.join(getScriptPath(), os.pardir))
+SPECIAL_VARIANTS_DOC = os.path.join(PROJ_DIR, 'docs', 'addendums_special_cases.tsv')
+
+#----common.py----------------------------------------------------------------
+
 
 AAPATT = re.compile('([A-Z][a-z][a-z])')
 AA_convert = {
@@ -74,6 +80,49 @@ def is_float(v):
   return True
 
 #----classes------------------------------------------------------------------
+
+class Fusions:
+  def __init__(self, fusionfile):
+    self.fusionfile = fusionfile
+    self.fusions = []
+    self._parse_fusion_file()
+
+  def _parse_fusion_file(self):
+    with open(self.fusionfile, 'r') as fh:
+      fields = None
+      for line in fh:
+        if line.startswith('#'):
+          continue
+        if not fields:
+          fields = line.rstrip().split("\t")
+        else:
+          values = line.rstrip().split("\t")
+          d = dict(zip(fields, values))
+          if d.get('Region1') and d.get('Region2'):
+            self.fusions.append("{}-{}".format(d['Region1'], d['Region2']))
+
+class CNVs:
+  def __init__(self, cnvfile):
+    self.cnvfile = cnvfile
+    self.cnvs = []
+    self._parse_cnv_file()
+
+  def _parse_cnv_file(self):
+    with open(self.cnvfile, 'r') as fh:
+      fields = None
+      for line in fh:
+        if line.startswith('#'):
+          continue
+        if not fields:
+          fields = line.rstrip().split("\t")
+        else:
+          values = line.rstrip().split("\t")
+          d = dict(zip(fields, values))
+          if d.get('Gene') and d.get('Status') and d['Status']=='AMP':
+            if d['Gene']=='NKX2': # correct STAMP CNV file error
+              d['Gene'] = 'NKX2-1'
+            self.cnvs.append(d['Gene'])
+
 
 class GA_CSV:
   required_cols = ['Chr:ChrPos', 'HGVSProtein', 'Gene', 'Pathogenicity',]
@@ -177,35 +226,107 @@ class GA_CSV:
 
 #-----------------------------------------------------------------------------
 
+def compile_csv_variants_for_doc(csvinfo):
+  variants = []
+  for vkey, vdata in sorted(csvinfo.datadict.items()):
+    if vdata['Pathogenicity'] in ('Pathogenic', 'Likely Pathogenic'):
+      ## determine variant comment
+      comment = ''
+      # remove transcript at beginning of some HGVSProtein entries
+      vdata['HGVSProtein'] = vdata['HGVSProtein'].split(':').pop()
+      if vdata['Gene'] in special_vars:
+        special_info = special_vars[vdata['Gene']]
+        if vdata['HGVSProtein'] in special_info:
+          comment = special_info[vdata['HGVSProtein']]
+        elif 'all' in special_info:
+          comment = special_info['all']
+        elif 'range' in special_info:
+          r = special_info['range']
+          chrom, pos = vdata['Chr:ChrPos'].split(':')
+          if r['chrom']==chrom and r['start']<= int(pos) <= r['end']:
+            comment = r['comment']
+      elif vdata['Gene']=='N/A':
+        if 'is a recurrent mutation in the TERT promoter' in vdata['VariantComment']:
+          vdata['Gene'] = 'TERT'
+          comment = special_vars['TERT']['all']
+      if not comment:
+        aa_change = AAPATT.sub(aa_replace, vdata['HGVSProtein']).lstrip('p.')
+        comment = '{} MUTATION'.format(aa_change)
+      variants.append([vdata['Gene'], comment])
+  return sorted(variants)
+
+def compile_fusion_variants_for_doc(fusionfile):
+  fusioninfo = Fusions(fusionfile)
+  variants = [ [ f, 'FUSION' ] for f in fusioninfo.fusions ]
+  return sorted(variants)
+
+def compile_cnv_variants_for_doc(cnvfile):
+  cnvinfo = CNVs(cnvfile)
+  variants = [ [ gene, 'AMPLIFICATION' ] for gene in cnvinfo.cnvs ]
+  return sorted(variants)
+
 def write_progress(boldtext='', normaltext='', bullet=False, newline=True):
   if bullet: 
     sys.stdout.write(' * ')
   sys.stderr.write(boldtext)
-  sys.stderr.write(text)
+  sys.stderr.write(normaltext)
   if newline:
     sys.stderr.write("\n")
 
-def create_word_docx(csvinfo, resident='RESIDENT', signout='ATTENDING', 
-    write_progress=write_progress, outfile="pathology_report_addendums.docx"):
+def create_word_docx(samples, special_vars, resident='RESIDENT', signout='ATTENDING', 
+    write_progress=write_progress, outdir=None, i=None):
   addendum_comment = """This addendum is issued to describe the results of next generation sequencing-based mutational profiling using the Stanford Solid Tumor Actionable Mutation Panel (STAMP), version PIPELINE_VERSION.  All variants considered "pathogenic" or "likely pathogenic" are reported here. For additional details on the variants detected as well as the full list of variants (including variants of uncertain significance) and methodologic details, please see the complete report in EPIC."""
   
+  sample_keys = sorted(samples.keys())
+  if outdir:
+    label = os.path.basename(outdir)
+    outfile = os.path.join(outdir, 'pathology_addendums{}.docx'.format(label))
+  else:
+    sample = [ s for s in sample_keys if samples[s].get('csv')]
+    outdir = os.path.abspath(os.path.join(os.path.dirname(samples[s]['csv'].csvfile), os.pardir))
+    outfile = os.path.join(outdir, 'pathology_addendums.docx')
   document = docx.Document()
   font = document.styles['Normal'].font
   font.name = 'Times New Roman'
   font.size = docx.shared.Pt(12)
-  write_progress("\nCreating report:", " {}".format(outfile))
-  for i, (csvfile, info) in enumerate(csvinfo):
-    write_progress("  {}) Adding: ".format(i+1), os.path.basename(csvfile))
-    if i:
+  paragraph_format = document.styles['Normal'].paragraph_format
+  paragraph_format.line_spacing = 1
+  paragraph_format.space_before = 0
+  paragraph_format.space_after = 0
+  write_progress("\nCreating report{}: ".format(" {}".format(i) if i else ''), 
+  outfile)
+  firstpage=True
+  for i, sample in enumerate(sample_keys):
+    csvinfo = samples[sample].get('csv')
+    cnvfile = samples[sample].get('cnvs')
+    fusionfile = samples[sample].get('fusions')
+    if csvinfo:
+      write_progress("  {}) Adding ".format(i+1), sample)
+    else:
+      write_progress("  {}) Skipping ".format(i+1), sample+': No CSV')
+      continue
+    if not firstpage:
       document.add_page_break()
-    p_csvfile = document.add_paragraph()
-    p_csvfile.add_run("CSV file: ")
-    p_csvfile.add_run(os.path.basename(csvfile))
-
+    p_filelist = document.add_paragraph()
+    variants = []
+    if fusionfile:
+      run = p_filelist.add_run("Fusion file: " + os.path.basename(fusionfile))
+      run.add_break()
+      variants = compile_fusion_variants_for_doc(fusionfile)
+    if csvinfo:
+      p_filelist.add_run("CSV file: ")
+      p_filelist_run = p_filelist.add_run(os.path.basename(csvinfo.csvfile))
+      p_filelist_run.add_break()
+      variants.extend(compile_csv_variants_for_doc(csvinfo))
+    if cnvfile:
+      run = p_filelist.add_run("CNV file: " + os.path.basename(cnvfile))
+      run.add_break()
+      variants.extend(compile_cnv_variants_for_doc(cnvfile))
     p_comment = document.add_paragraph()
     p_comment.add_run('ADDENDUM COMMENT: ').bold = True
-    pipeline_version = info.pipeline_version.split('v').pop()
-    p_comment.add_run(addendum_comment.replace('PIPELINE_VERSION', pipeline_version))
+    pipeline_version = csvinfo.pipeline_version.split('v').pop()
+    p_comment_run = p_comment.add_run(addendum_comment.replace('PIPELINE_VERSION', pipeline_version))
+    p_comment_run.add_break()
     
     p_diagnosis = document.add_paragraph()
     run_diagnosis = p_diagnosis.add_run('ADDENDUM DIAGNOSIS:')
@@ -214,74 +335,145 @@ def create_word_docx(csvinfo, resident='RESIDENT', signout='ATTENDING',
     run_diagnosis2 = p_diagnosis.add_run('SPECIMENID, MUTATIONAL PROFILING BY STAMP')
     run_diagnosis2.bold = True
     run_diagnosis2.add_break()
-    have_variants = False
-    for vkey, vdata in sorted(info.datadict.items()):
-      if vdata['Pathogenicity'] in ('Pathogenic', 'Likely Pathogenic'):
-        have_variants = True
-        aa_change = AAPATT.sub(aa_replace, vdata['HGVSProtein']).lstrip('p.')
-        p_diagnosis.add_run('\t--\tPOSITIVE FOR ').bold=True
-        gene_run = p_diagnosis.add_run(vdata['Gene'])
-        gene_run.bold=True
-        gene_run.italic=True
-        run = p_diagnosis.add_run(' {} MUTATION'.format(aa_change))
-        run.bold = True
-        run.add_break()
-    if not have_variants:
-      p_diagnosis.add_run('\tNone')
+    run = run_diagnosis2
+
+    if variants:
+    ## add detected variants to word doc
+      for variant, comment in variants:
+          p_diagnosis.add_run('\t--\tPOSITIVE FOR ').bold=True
+          gene_run = p_diagnosis.add_run(variant)
+          gene_run.bold=True
+          gene_run.italic=True
+          run = p_diagnosis.add_run(' '+comment)
+          run.bold = True
+          run.add_break()
+    else:
+      p_diagnosis.add_run('\t--\tNO PATHOGENIC OR LIKELY PATHOGENIC VARIANTS DETECTED')
     p_names = document.add_paragraph()
     p_names.add_run('{}/KUNDER/{}'.format(resident, signout)).bold=True
+    firstpage=False
   document.save(outfile)
   write_progress('', "Done.")
 
-def parse_csv_files(csvfiles):
-  csvinfo = []
-  badfiles = []
-  for csvfile in csvfiles:
-    ga_csvinfo = GA_CSV(csvfile)
-    if ga_csvinfo.missing_fields:
-      if ga_csvinfo.is_valid:
-        badfiles.append([csvfile, 'Missing required fields: {}'.format(
-        ', '.join(ga_csvinfo.missing_fields[:3]))])
-      else:
-        badfiles.append([csvfile, 'Not a GA CSV'])
-    else:
-      csvinfo.append([csvfile, ga_csvinfo])
-      sys.stdout.write("  {} variants\t{}\n".format(ga_csvinfo.num_variants,
-                     os.path.basename(csvfile)))
-  return csvinfo, badfiles
+def parse_special_variants_file(tsvfile):
+  """Input is tab-delimited file with fields: Variant, Range, Gene, Comment.
+  Variants in specified Gene listed under Variant column or in range of Range 
+  column will be given the comment in Comment column istead of default comment.
 
-def filter_input_files(inputfiles):
+  special_vars[gene][variant] = comment
+  special_vars[gene]['all'] = comment
+  special_vars[gene]['range'] = {'chrom', 'start', 'end', 'comment'}
+  """
+  special_vars = { 'TERT': {'all':'PROMOTER MUTATION'} }
+  if tsvfile and os.path.isfile(tsvfile):
+    with open(tsvfile, 'r') as fh:
+      fields = [ f.strip() for f in fh.readline().rstrip().split('\t') ]
+      for line in fh:
+        vals = [ v.strip() for v in line.rstrip().split('\t') ]
+        d = dict(zip(fields, vals))
+        if d.get('Gene') and d.get('Comment'):
+          if not d['Gene'] in special_vars:
+            special_vars[d['Gene']] = {}
+          if d.get('Variant'):
+            special_vars[d['Gene']][d['Variant']] = d['Comment']
+          elif d.get('Range'):
+            chrom, startend = d['Range'].split(':')
+            start, end = startend.split('_')
+            special_vars[d['Gene']]['range'] = {'chrom':chrom.replace('chr',''),
+            'start':int(start), 'end':int(end), 'comment':d['Comment']}
+  return special_vars
+
+def filter_input(inputargs):
   infiles = []
-  for in_arg in inputfiles: # input can be files or folders
+  indirs = []
+  # input can be files or folders or folders of folders
+  for in_arg in inputargs: 
     if os.path.isfile(in_arg):
-      infiles.append(in_arg)
+      infiles.append([in_arg, ])
     elif os.path.isdir(in_arg):
-      infiles.extend([ os.path.join(in_arg, f) for f in \
-               os.listdir(in_arg) ])
+      indirs.append(in_arg)
+
+  subdirs = []
+  for indir in indirs:
+    for name in os.listdir(indir):
+      dirfile = os.path.join(indir, name)
+      if os.path.isfile(dirfile):
+        infiles.append([dirfile, indir])
+      elif os.path.isdir(dirfile):
+        subdirs.append([dirfile, indir])
+
+  for subdir, dirname in subdirs:
+    for name in os.listdir(subdir):
+      dirfile = os.path.join(subdir, name)
+      if os.path.isfile(dirfile):
+        infiles.append([dirfile, dirname, subdir])
+
   badfiles = []
-  csvfiles = []
-  for infile in infiles:
-    if infile.lower().endswith('.csv'):
-      csvfiles.append(infile)
+  runs = defaultdict(lambda:defaultdict(dict))
+  samples = defaultdict(dict)
+  for infile_vals in sorted(infiles, key=lambda x:(3-len(x), x[0])):
+    infile = infile_vals.pop(0)
+    base = os.path.basename(infile)
+    lcname = base.lower()
+    if lcname.endswith('.csv'): # CSV file
+      sample = base.replace('.csv','').replace('_accepted_Report','')
+      ga_csvinfo = GA_CSV(infile)
+      if ga_csvinfo.missing_fields: # bad CSV
+        if ga_csvinfo.is_valid:
+          badfiles.append([infile, 'Missing required fields: {}'.format(
+          ', '.join(ga_csvinfo.missing_fields[:3]))])
+        else:
+          badfiles.append([infile, 'Not a GA CSV'])
+      else: # good CSV
+        if len(infile_vals)==2 or (len(infile_vals)==1 and infile_vals[0] in runs):
+          run = infile_vals.pop(0)
+          runs[run][sample]['csv'] = ga_csvinfo
+        else:
+          samples[sample]['csv'] = ga_csvinfo
+    elif lcname.endswith('.cnvs') and not lcname.endswith('.tiles.cnvs') \
+          and not lcname.endswith('.offtarget.cnvs'):
+      sample = base.replace('.cnvs','')
+      if len(infile_vals)==2 or (len(infile_vals)==1 and infile_vals[0] in runs):
+        run = infile_vals.pop(0)
+        runs[run][sample]['cnvs'] = infile
+      else:
+        samples[sample]['cnvs'] = infile
+    elif lcname.endswith('.fusions.filtered.txt'):
+      sample = base.replace('.fusions.filtered.txt','')
+      if len(infile_vals)==2 or (len(infile_vals)==1 and infile_vals[0] in runs):
+        run = infile_vals.pop(0)
+        runs[run][sample]['fusions'] = infile
+      else:
+        samples[sample]['fusions'] = infile
     else:
-      badfiles.append(infile)
-  return csvfiles, badfiles
+      badfiles.append([infile, 'Not a recognized input file'])
+  if samples:
+    runs[''] = samples
+  for r in sorted(runs.keys()):
+    for s in sorted(runs[r].keys()):
+      print "RUN {}: {}\t{}".format(os.path.basename(r), s, r)
+      for k in sorted(runs[r][s].keys()):
+        print "    {} -- {}".format(k, runs[r][s][k])
+  sys.stdout.flush()
+  return runs, badfiles
 
 #----gui.py-------------------------------------------------------------------
 
 class AddendumApp(wx.App):
-  def __init__(self, options, **kwargs):
+  def __init__(self, special_vars, options, **kwargs):
+    self.special_vars = special_vars
     self.options = options
     wx.App.__init__(self, kwargs)
 
   def OnInit(self):
-    self.frame = MainFrame(self.options)
+    self.frame = MainFrame(self.special_vars, self.options)
     self.frame.Show()
     self.SetTopWindow(self.frame)
     return True
 
 class MainFrame(wx.Frame):
-  def __init__(self, options, *args, **kwargs):
+  def __init__(self, special_vars, options, *args, **kwargs):
+    self.special_vars = special_vars
     self.options = options
     super(MainFrame, self).__init__(None, *args, size=(550,500),
               title="STAMP Addendum Generator v"+VERSION, **kwargs)
@@ -294,7 +486,7 @@ class MainFrame(wx.Frame):
     self.filedrop = FileDropProcessing(self, self.rtc, self.entry_panel)
     self.rtc.SetDropTarget(self.filedrop)
 
-    button_run = wx.Button(panel, -1, "Create report", style=wx.BU_EXACTFIT)
+    button_run = wx.Button(panel, -1, "Create reports", style=wx.BU_EXACTFIT)
     button_run.SetToolTip(wx.ToolTip("Create Word document"))
     self.Bind(wx.EVT_BUTTON, self.createReport, button_run)
     button_reset = wx.Button(panel, -1, "Reset", style=wx.BU_EXACTFIT)
@@ -339,8 +531,8 @@ class FileDropProcessing(wx.FileDropTarget):
     self.window = window
     self.entries = entries
     self.current_pos = 0
-    self.csvinfo = []
-    self.num_csv = 0
+    self.runs = {}
+    self.num_samples = 0
 
   def ScrollWindow(self):
     pos = self.window.GetScrollRange(wx.VERTICAL)
@@ -368,39 +560,36 @@ class FileDropProcessing(wx.FileDropTarget):
     self.window.Refresh()
 
   def OnDropFiles(self, x, y, filenames):
-    csvfiles, badfiles = filter_input_files(filenames)
+    self.runs, badfiles = filter_input(filenames)
+    sys.stderr.write('\n'.join([ "{}: {}".format(err, f) for f, err in badfiles ]))
     if badfiles:
       self.window.MoveEnd()
-      for badfile in badfiles:
-        self.WriteFormattedText(newline=False,
-          normaltext="Not a recognized input file: {}\n".\
-          format(os.path.basename(badfile)))
-        self.ScrollWindow()
-
-    csvinfo, badfiles_csv = parse_csv_files(csvfiles)
-    if badfiles_csv:
-      self.window.MoveEnd()
-      for errmsg, badfile in badfiles_csv:
+      for badfile, errmsg in badfiles:
         self.WriteFormattedText(newline=False,
           normaltext="{}: {}\n".format(errmsg, os.path.basename(badfile)))
         self.ScrollWindow()
+    for i, (run, rundict) in enumerate(self.runs.items()):
+      self.WriteFormattedText("Run {}: ".format(i+1), os.path.basename(run))
+      for sample, sampledict in sorted(rundict.items()):
+        filetypes = sorted(sampledict.keys())
+        note = '' if 'csv' in filetypes else ' -- No CSV.  Skipping'
+        self.WriteFormattedText(newline=False,
+          normaltext="  {} ({}){}\n".format(sample, ', '.join(filetypes),
+          note))
     self.WriteFormattedText(newline=True)
-
-    if csvinfo:
-      for csvfile, info in csvinfo:
-        self.num_csv += 1
-        self.WriteFormattedText("CSV file {}: ".format(self.num_csv), os.path.basename(csvfile))
-        self.csvinfo.append([csvfile, info])
 
   def createReport(self):
     try:
-      if self.csvinfo:
+      if self.runs:
+        i=None
         self.entries.updateInfo()
-        outfile = self.entries.output_file(self.csvinfo[0][0])
-        create_word_docx(self.csvinfo, self.entries.resident, 
-          self.entries.signout, 
-          outfile=outfile, write_progress=self.WriteFormattedText)
-        self.WriteFormattedText(newline=True)
+        for num, run in enumerate(self.runs):
+          samples = self.runs[run]
+          if len(self.runs)>1:
+            i=num+1
+          create_word_docx(samples, self.parent.special_vars,
+            self.entries.resident, self.entries.signout, i=i,
+            outdir=run, write_progress=self.WriteFormattedText)
     except Exception as e:
       errormsg = "{} {}\n\n".format(type(e).__name__, e)
       self.WriteFormattedText("  ERROR: ", errormsg)
@@ -409,7 +598,7 @@ class FileDropProcessing(wx.FileDropTarget):
 
   def reset(self):
     self.csvinfo = []
-    self.num_csv = 0
+    self.num_samples = 0
     self.WriteFormattedText("CSV files: ", "None")
 
 class AddendumRTC(wx.richtext.RichTextCtrl):
@@ -517,18 +706,19 @@ class EntryPanel(wx.Panel):
       return outfile
 
 
-def run_gui(args):
-  app = AddendumApp(args)
+def run_gui(args, special_vars):
+  app = AddendumApp(special_vars, args)
   app.MainLoop()
 
 #-----------------------------------------------------------------------------
+
 if __name__=='__main__':
   descr = "Create pathology report addendums."
   descr += " All input CSV files will be compiled into one Word document"
   descr += " with data from each CSV file on a separate page."
   parser = ArgumentParser(description=descr)
-  parser.add_argument("csv_files", nargs="*",
-            help="STAMP CSV files")
+  parser.add_argument("input", nargs="*", help="STAMP rundir or "+\
+       "folders or files containing STAMP CSV, fusion, and cnv files")
   parser.add_argument("-r", "--resident", help="Name of resident",
                       default="RESIDENTSNAME")
   parser.add_argument("-s", "--signout", help="Name of sign-out attending",
@@ -539,14 +729,18 @@ if __name__=='__main__':
             help="Write debugging messages")
 
   args = parser.parse_args()
-  if len(args.csv_files)==0:
-    run_gui(args)
+  special_vars = parse_special_variants_file(SPECIAL_VARIANTS_DOC)
+  if len(args.input)==0:
+    run_gui(args, special_vars)
   else:
-    csvfiles, badfiles = filter_input_files(args.csv_files)
-    sys.stderr.write('\n'.join([ "Not a recognized input file: {}".format(csv) \
-                     for csv in badfiles ]))
-    csvinfo, badfiles = parse_csv_files(csvfiles)
-    sys.stderr.write('\n'.join([ "{}: {}".format(err, csv) for csv, err in badfiles ]))
-    create_word_docx(csvinfo, args.resident, args.signout, outfile=args.outfile)
+    runs, badfiles = filter_input(args.input)
+    sys.stderr.write('\n'.join([ "{}: {}".format(err, f) for f, err in badfiles ]))
+    i=None
+    for num, run in enumerate(runs):
+      if len(runs)>1:
+        i=num+1
+      samples = runs[run]
+      create_word_docx(samples, special_vars, args.resident, args.signout, 
+                       outdir=run, i=i)
 
 
