@@ -18,16 +18,17 @@ import xlsxwriter
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="1.4"
-BUILD="170418"
+VERSION="1.5"
+BUILD="170516"
 
 # REVISION HISTORY
+# 170516 - Change CNV value to mean-z instead of copies
 # 170418 - Add CNVs to HD753 control qc
 # 170112 - Fix runnum lstrip to work for STAMP300
 # 160916 - Only highlight missing expected variants
 # 160713
-# * Hide unexpected variants
-# * Add gray background to non-horizon, unexpected variants
+# * Hide other variants
+# * Add gray background to non-horizon, other variants
 # * Add HD753_stampV2 to CONTROL_LIST
 # * Use STAMP V1 or STAMP V2 variants depending on script name
 # * Remove extraneous fields from database (dbSNP, COSMIC, strand)
@@ -89,6 +90,7 @@ FORMAT_VARTYPE = {
   }
 }
 REFS = {}
+CNV_CUTOFF_STR = '# mean-z-cutoffs: [12.0, 5.0, -6.0, -12.0]'
 
 def check_references(docsdir, datadir, ctrl_version):
     """Populate global REFS variable with reference files found
@@ -185,30 +187,38 @@ def group_files_by_sample(inputfiles):
                 sample = os.path.basename(infile).replace(ext,'')
                 runnum = sample.lstrip('TRUQtruqHDhd753').lstrip('_').lstrip('STAMP')
                 runnum = runnum.split('_')[0]
+                # sort validation runs first from regular runs
+                if runnum.startswith("V"):
+                  runnum = " "+runnum
                 run = "STAMP{}".format(runnum) if runnum else ''
                 samples[sample][extensions[ext]] = infile
                 samples[sample]['run'] = run
                 samples[sample]['control'] = control
     return samples, badfiles
 
-def massage_data(data):
+def massage_data(data, vartype):
     """Unify differing formats and convert data types to appropriate types"""
-    for d in data:
-        d['position'] = int(d['position'])
-        if not 'HGVS' in d and 'CDS_Change' in d:
-            if len(d['CDS_Change']) > 1:
-                d['HGVS'] = 'c.' + d['CDS_Change']
-        elif not 'CDS_Change' in d and 'HGVS' in d:
-            d['CDS_Change'] = d['HGVS'].lstrip('c').lstrip('.')
-        if not 'protein' in d and 'AA_Change' in d:
-            d['protein'] = d['AA_Change']
-        elif not 'AA_Change' in d and 'protein' in d:
-            d['AA_Change'] = d['protein']
-        if 'expectedVAF' in d:
-            if d['expectedVAF']:
-                d['HorizonVAF'] = float(d['expectedVAF'].rstrip('%'))
-            else:
-                d['HorizonVAF'] = None
+    if vartype=='mutation':
+        for d in data:
+            d['position'] = int(d['position'])
+            if not 'HGVS' in d and 'CDS_Change' in d:
+                if len(d['CDS_Change']) > 1:
+                    d['HGVS'] = 'c.' + d['CDS_Change']
+            elif not 'CDS_Change' in d and 'HGVS' in d:
+                d['CDS_Change'] = d['HGVS'].lstrip('c').lstrip('.')
+            if not 'protein' in d and 'AA_Change' in d:
+                d['protein'] = d['AA_Change']
+            elif not 'AA_Change' in d and 'protein' in d:
+                d['AA_Change'] = d['protein']
+            if 'expectedVAF' in d:
+                if d['expectedVAF']:
+                    d['HorizonVAF'] = float(d['expectedVAF'].rstrip('%'))
+                else:
+                    d['HorizonVAF'] = None
+    elif vartype=='cnv':
+        for d in data:
+            if 'mean-z' in d:
+                d['mean_z'] = d['mean-z']
 
 def count_uppercase(s):
     return sum(1 for c in s if c.isupper())
@@ -249,9 +259,11 @@ def parse_tab_file(tabfile, keyfunc=None, fieldfunc=None, requiredfield=None):
        requiredfield -- skip rows where this field is empty.  """
     data = []
     datadict = {}
+    header = []
     with open(tabfile, 'r') as fh:
         for line in fh:
             if line.startswith('#'):
+                header.append(line.rstrip())
                 continue
             else:
                 fields = [ fieldfunc(f.strip()) if fieldfunc else f.strip() \
@@ -270,7 +282,7 @@ def parse_tab_file(tabfile, keyfunc=None, fieldfunc=None, requiredfield=None):
                 dkey = keyfunc(d)
                 d['dkey'] = dkey
                 datadict[dkey] = d
-    tabfileinfo = {'fields':fields, 'data':data}
+    tabfileinfo = {'fields':fields, 'data':data, 'header':header}
     if keyfunc:
         tabfileinfo['datadict'] = datadict
     return tabfileinfo
@@ -290,7 +302,7 @@ def print_checked_file(vinfo, truthset, outfile):
         fields = vinfo.fields[vartype][:] + ['Expected?',]
         sys.stdout.write("Writing {}\n".format(outfile[vartype]))
         content = "# Num expected found: {}\n".format(summary['Expected']) +\
-                  "# Num not expected: {}\n".format(summary['Unexpected']) +\
+                  "# Num not expected: {}\n".format(summary['Other']) +\
                   "# Num not found: {}\n".format(summary['Not found'])
         sys.stdout.write(content)
         content += "\t".join([field2reportfield(f) for f in fields])+"\n"
@@ -403,7 +415,7 @@ def get_num_variants_missing(cursor, sample_id, vartype):
     ans = cursor.fetchone()
     return ans[0] if ans else None
 
-def get_num_variants_unexpected(cursor, sample_id, vartype):
+def get_num_variants_other(cursor, sample_id, vartype):
     cmd = "SELECT count(*) FROM {0} v, sample_{0} sv ".format(vartype)+\
           " WHERE v.id=sv.{}_id AND v.is_expected=0".format(vartype)+\
           " AND sv.sample_id=?"
@@ -412,16 +424,19 @@ def get_num_variants_unexpected(cursor, sample_id, vartype):
     return ans[0] if ans else None
 
 def update_sample_counts(cursor, sample_id):
-    vals = [sample_id, sample_id]
-    for vartype in ('mutation', 'fusion'):
+    vals = [sample_id, sample_id, sample_id]
+    for vartype in ('mutation', 'fusion', 'cnv'):
         vals.append(get_num_variants_missing(cursor, sample_id, vartype))
-        vals.append(get_num_variants_unexpected(cursor, sample_id, vartype))
+        vals.append(get_num_variants_other(cursor, sample_id, vartype))
     cmd = "UPDATE sample SET num_mutations="+\
           "(SELECT COUNT(*) FROM sample_mutation WHERE sample_id=?),"+\
           " num_fusions="+\
           "(SELECT COUNT(*) FROM sample_fusion WHERE sample_id=?),"+\
-          " num_mutations_missing=?, num_mutations_unexpected=?, "+\
-          " num_fusions_missing=?, num_fusions_unexpected=?"+\
+          " num_cnvs="+\
+          "(SELECT COUNT(*) FROM sample_cnv WHERE sample_id=?),"+\
+          " num_mutations_missing=?, num_mutations_other=?, "+\
+          " num_fusions_missing=?, num_fusions_other=?,"+\
+          " num_cnvs_missing=?, num_cnvs_other=?"+\
           " WHERE sample.id=?"
     vals.append(sample_id)
     cursor.execute(cmd, vals)
@@ -578,9 +593,9 @@ def save_sample_cnv(cursor, sample_id, d, fields, debug=False):
     if not cnv: # cnv not in db, so save
         save_variants(cursor, 'cnv', [d,], fields)
         cnv = get_cnv(cursor, d['gene'], debug=debug)
-    ins_sql = 'INSERT INTO sample_cnv (sample_id, cnv_id, mcopies, '+\
-              'status, last_modified) VALUES (?,?,?,?,?)'
-    vals = [ d[f] if f in d else None for f in ('mcopies', 'status') ]
+    ins_sql = 'INSERT INTO sample_cnv (sample_id, cnv_id, mean_z, '+\
+              'mcopies, status, last_modified) VALUES (?,?,?,?,?,?)'
+    vals = [ d[f] if f in d else None for f in ('mean_z', 'mcopies', 'status') ]
     vals.append(current_time())
     cursor.execute(ins_sql, ([sample_id, cnv['id'],]+vals))
 
@@ -730,8 +745,13 @@ class VariantSet:
         requiredfield = 'status' if vartype=='cnv' else None
         vinfo = parse_tab_file(vfile, keyfunc=create_dkey, 
                 fieldfunc=field2dbfield, requiredfield=requiredfield)
-        if vartype=='mutation':
-            massage_data(vinfo['data'])
+        massage_data(vinfo['data'], vartype)
+        if vartype=='cnv':
+            # CNV cutoffs are hardcoded.  Check that they are still valid.
+            if not CNV_CUTOFF_STR in vinfo['header']:
+                sys.stderr.write("WARNING: Need to check CNV cutoffs in {}\n".format(vfile))
+                sys.stderr.write("  Expect {}\nHave {}\n".format(CNV_CUTOFF_STR, vinfo['header']))
+                sys.stderr.flush()
         self.data[vartype] = vinfo['data']
         self.datadict[vartype] = vinfo['datadict']
         self.fields[vartype] = vinfo['fields']
@@ -741,6 +761,8 @@ class VariantSet:
         return vinfo
 
     def compare_variants(self, defaultstatus='PASS'):
+        """Counts number of expected, other, and total variants present in 
+        variantset.  Also returns dkeys to missing expected variants."""
         self.summary = {'Status': defaultstatus }
         tot_notfound = 0
         for vartype in self.vartypes:
@@ -748,7 +770,7 @@ class VariantSet:
             create_dkey = self.truthset.dkey[vartype]
             truths_seen = dict([ (dkey, False) for dkey in truth ])
             self.summary[vartype] = { 'Total':0, #'Status': defaultstatus,
-                                      'Expected':0, 'Unexpected':0, }
+                                      'Expected':0, 'Other':0, }
             summary = self.summary[vartype]
             for d in self.data[vartype]:
                 d['Expected?'] = 'Not expected'
@@ -759,7 +781,7 @@ class VariantSet:
                     d['Expected?'] = 'Expected'
                     truths_seen[dkey] = True
                 else:
-                    summary['Unexpected'] += 1
+                    summary['Other'] += 1
             notseen = [ dkey for dkey in truths_seen.keys() 
                         if not truths_seen[dkey] ]
             summary['Not found'] = len(notseen)
@@ -896,8 +918,8 @@ def mutation_sheet_data(ctrl, dbh, samples, tfields):
             vdict[dkey][d['sample_name']] = d
     numexpected = len(data['expected']) + len(data['horizon'])
     data['header'] = [ "# This spreadsheet is automatically generated." +\
-           " Any edits will be lost in future versions.", ] +\
-           [ "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
+           " Any edits will be lost in future versions.",
+           "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
            "# Num expected variants: {}".format(numexpected), ]
     data['fields'] = tfields[:]
 #    data['fields'].remove('ref')
@@ -929,8 +951,8 @@ def fusion_sheet_data(ctrl, dbh, samples, tfields):
             vdict[dkey][d['sample_name']] = d
     numexpected = len(data['expected']) + len(data['horizon'])
     data['header'] = [ "# This spreadsheet is automatically generated." +\
-           " Any edits will be lost in future versions.", ] +\
-           [ "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
+           " Any edits will be lost in future versions.",
+           "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
            "# Num expected variants: {}".format(numexpected), ]
     data['fields'] = tfields[:]
     if 'is_expected' in data['fields']: 
@@ -960,12 +982,15 @@ def cnv_sheet_data(ctrl, dbh, samples, tfields):
             vdict[dkey][d['sample_name']] = d
     numexpected = len(data['expected']) + len(data['horizon'])
     data['header'] = [ "# This spreadsheet is automatically generated." +\
-           " Any edits will be lost in future versions.", ] +\
-           [ "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
-           "# Num expected variants: {}".format(numexpected), ]
+           " Any edits will be lost in future versions.", 
+           "# Num samples in spreadsheet: {}".format(len(samples['good'])), 
+           "# Num expected variants: {}".format(numexpected), 
+           CNV_CUTOFF_STR]
     data['fields'] = tfields[:]
-    if 'is_expected' in data['fields']: 
-        data['fields'].remove('is_expected')
+    # exclude these fields in cnv table from output
+    for exclude in ('is_expected', 'HorizonCopies'):
+      if exclude in data['fields']: 
+        data['fields'].remove(exclude)
     return data
 
 def convert_to_excel_col(colnum):
@@ -1200,7 +1225,7 @@ def add_cnv_sheet_excel(workbook, wbformat, samples, data, fieldfunc=None):
     for colnum, f in enumerate(data['fields']):
         colname = fieldfunc(f) if fieldfunc else f
         worksheet.write(rownum, colnum, colname, wbformat['bold'])
-    calc_fields = ['AverageCopies', 'StddevCopies', '%Detection']
+    calc_fields = ['AverageScore', 'StddevScore', '%Detection']
     i_col_avg = colnum+1
     i_col_std = colnum+2
     for f in calc_fields:
@@ -1217,7 +1242,7 @@ def add_cnv_sheet_excel(workbook, wbformat, samples, data, fieldfunc=None):
     runcolxl_e = convert_to_excel_col(i_col_run_e)
     avgcolxl = convert_to_excel_col(i_col_avg)
     stdcolxl = convert_to_excel_col(i_col_std)
-    i_horizonCopies = data['fields'].index('HorizonCopies')
+#    i_horizonCopies = data['fields'].index('HorizonCopies')
     # print data by row/mutation, expected first
     numvariants = 0
     for expecttype in ('horizon', 'expected', 'not_expected'):
@@ -1234,18 +1259,11 @@ def add_cnv_sheet_excel(workbook, wbformat, samples, data, fieldfunc=None):
         vdat2 = [ d for d in vdat if d ] # dicts with data only
         for colnum, f in enumerate(data['fields']):
             v = vdat2[0][f] if f in vdat2[0] else ''
-            if colnum == i_horizonCopies: # format as number
-                if v:
-                  worksheet.write_number(rownum, colnum, v)
-#            elif colnum == i_horizonCopies: # format as number/percent
-#                if v: 
-#                    worksheet.write(rownum, colnum, v/100, percformat)
-            else:
-                worksheet.write(rownum, colnum, v)
+            worksheet.write(rownum, colnum, v)
         skipcalc = len(calc_fields)
         for i, d in enumerate(vdat):
             if d: worksheet.write_number(rownum, colnum+i+skipcalc+1, 
-                                         float(d['mcopies']))
+                                         float(d['mean_z']))
         runrange = "{1}{0}:{2}{0}".format(rownum+1, runcolxl_s, runcolxl_e)
         add_avg_stddev_columns(worksheet, rownum, i_col_avg, i_col_std,
                                vdat2, runrange, expecttype)
@@ -1281,6 +1299,7 @@ def generate_excel_spreadsheet(ctrl, dbh, tfields, outfile):
     sys.stdout.write("\nCreating {} Excel file:\n{}\n".format(ctrl, outfile))
     workbook = xlsxwriter.Workbook(outfile)
     wbformat = add_formats_to_workbook(workbook)
+    nums = {}
     for vartype in VARTYPES:
         all_samples = get_samples(dbh.cursor(), vartype=vartype)
         samples = { 'failed': [], 'good': [], 'runs': [] }
@@ -1293,8 +1312,8 @@ def generate_excel_spreadsheet(ctrl, dbh, tfields, outfile):
                 samples['runs'].append(d['run_name'])
         data = compile_sheet_data[vartype](ctrl, dbh, samples, tfields[vartype])
         if data and (data.get('horizon') or data.get('expected')):
-            nums = add_sheet_excel[vartype](workbook, wbformat, samples, data, 
-                   fieldfunc=field2reportfield) 
+            nums[vartype] = add_sheet_excel[vartype](workbook, wbformat, 
+                            samples, data, fieldfunc=field2reportfield) 
 #    if data.get('fusion') and (data['fusion'].get('expected') or data['fusion'].get('horizon')):
 #        nums = add_fusion_sheet_excel(workbook, wbformat, samples['fusion'], 
 #               data['fusion'], fieldfunc=field2reportfield) 
@@ -1441,10 +1460,14 @@ class StampFrame(wx.Frame):
                                      ctrl))
                 res = generate_excel_spreadsheet(ctrl, self.dbh[ctrl], 
                   self.tinfo[ctrl].fields, REFS[ctrl]['SPREADSHEET'])
-                self.text.AppendText(
-                    "      {} spreadsheet now contains ".format(ctrl)+\
-                    "{} runs and {} unique variants\n".format(res['num_runs'],
-                    res['num_variants']))
+                counts = []
+                for vartype, nums in sorted(res.items()):
+                    counts.append("{} {}s".format(nums['num_variants'], vartype))
+                numruns = res['mutation']['num_runs'] if res.get('mutation') else 0
+                msg = "      {} ({} runs)".format(ctrl, numruns)
+                if counts:
+                    msg += ': '+', '.join(counts)
+                self.text.AppendText(msg+'\n')
 #                if res['failedsamples']:
 #                    self.text.AppendText(
 #                         "      Failed samples not included: {}\n".format(
@@ -1643,7 +1666,7 @@ class TabPanel_Results(wx.Panel):
             varname = FORMAT_VARTYPE['format'][vartype]
             infostr1 += "Total {}s:{:9d}\n".format(varname, summary['Total'])\
             +"    Expected {}s:{:8d}\n".format(varname, summary['Expected'])+\
-            "    Other {}s:{:4d}\n".format(varname, summary['Unexpected'])
+            "    Other {}s:{:4d}\n".format(varname, summary['Other'])
 #        info2summ = "Missing {} expected variants\n".format(num_missing) \
 #               if num_missing else 'All expected variants found.\n'
         infoText1 = wx.StaticText(self, -1, infostr1)

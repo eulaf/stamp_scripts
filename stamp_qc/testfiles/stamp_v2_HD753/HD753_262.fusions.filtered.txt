@@ -1,0 +1,3 @@
+Est_Type	Region1	Region2	Break1	Break2	Break_support1	Break_support2	Break_offset	Orientation	Order1	Order2	Break_depth	Proper_pair_support	Unmapped_support	Improper_pair_support	Paired_end_depth	Total_depth	Fusion_seq	Non-templated_seq	Region1_strand	Region2_strand	Topology_string
+TRA	ROS1	SLC34A2	chr6:117658326	chr4:25666629	8	1	1	1- 2+	CN	CN	50	9	41	0	25	855	AGAAAATAGCACCTCACTTCCAGAAAGCTTTAAGACAAAAGGTGAGTACT <> AGAGTAAGATTCAGTCTCAGATCTGGGTGACACAAAGGACCATGGATTTC	-	-1	1	>-----|----->
+INV	RET	CCDC6	chr10:43609948	chr10:61638615	5	1	4	1- 2+	CN	CN	26	6	20	0	12	1811	ACCGAGACGATGAAGGAGAAGAGGACAGCGGCTGCGATCACCGTGCGGCA <> AGGAATTATTTAACAATTATGACTATTCATTTAGGCCAAGCCATAAGGGA	-	1	-1	<-----|-----<

@@ -48,10 +48,13 @@ create table sample(
     run_name    TEXT,
     num_mutations    INTEGER,
     num_mutations_missing    INTEGER,
-    num_mutations_unexpected    INTEGER,
+    num_mutations_other    INTEGER,
     num_fusions    INTEGER,
     num_fusions_missing    INTEGER,
-    num_fusions_unexpected    INTEGER,
+    num_fusions_other    INTEGER,
+    num_cnvs    INTEGER,
+    num_cnvs_missing    INTEGER,
+    num_cnvs_other    INTEGER,
     sample_status    TEXT,
 	last_modified    TIMESTAMP
 );
@@ -77,6 +80,7 @@ create table sample_fusion(
 create table sample_cnv(
     sample_id    INTEGER,
     cnv_id    INTEGER,
+    mean_z    REAL,
     mcopies    REAL,
     status    TEXT,
 	last_modified    TIMESTAMP,
