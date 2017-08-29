@@ -16,11 +16,12 @@ import wx.richtext
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="2.0"
-BUILD="170518"
+VERSION="2.1"
+BUILD="170828"
 
 ## REVISION HISTORY
-# 170518 - Convert from perl to python
+# v2.1 170828 - Restrict sample names to letters, digits, hyphens, underscores
+# v2.0 170518 - Convert from perl to python
 # 170111 - Remove periods from sample names
 # 170217 - Always remove commas from sample name
 
@@ -95,7 +96,8 @@ class STAMPCoversheet():
                 #  * Entry usually Last, First or Last_First
                 #  * Research samples usually sample_research, so don't
                 #    split into last, first if '_research'
-                names = re.split('[_,]+\s*(?!research)', name.replace('-', ''), 1)
+#                names = re.split('[_,]+\s*(?!research)', name.replace('-', ''), 1)
+                names = re.split('[_,]+\s*(?!research)', name, 1)
                 last = names.pop(0)
                 first = names.pop() if names else ''
                 first = re.sub('([A-Z])[a-z]*', r'\1', first)
@@ -103,11 +105,13 @@ class STAMPCoversheet():
                 if lab and lab in name: 
                     # if lab entry already in name, don't duplicate
                     lab = ''
-                sample = '_'.join([ str(v) for v in (name, lab, mrn)])
+                sample = '_'.join([ v.encode('utf-8') for v in (name, lab, mrn)])
             else:
                 sample = name
             # remove spaces and non-standard characters
-            sample = re.sub(r'[\s\.\x9F-\xFF]', '', sample)
+            # only allow English letters, digits, hyphens and underscores
+            #sample = re.sub(r'[\s\.\x9F-\xFF]', '', sample)
+            sample = re.sub(r'[^-\w]', '', sample)
             # make sure not to have duplicate names
             if sample in samples_seen:
                 samples_seen[sample] += 1
