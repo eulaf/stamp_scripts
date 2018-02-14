@@ -16,10 +16,12 @@ import wx.richtext
 from collections import defaultdict
 from argparse import ArgumentParser
 
-VERSION="2.1"
-BUILD="170828"
+PROGRAM=os.path.basename(sys.argv[0])
+VERSION="2.2"
+BUILD="180209"
 
 ## REVISION HISTORY
+# v2.2 180209 - Fix display numbering when multiple inputs entered at once
 # v2.1 170828 - Restrict sample names to letters, digits, hyphens, underscores
 # v2.0 170518 - Convert from perl to python
 # 170111 - Remove periods from sample names
@@ -29,13 +31,14 @@ BUILD="170828"
 #----classes------------------------------------------------------------------
 
 class STAMPCoversheet():
-    def __init__(self, coversheet, outdir=None):
+    def __init__(self, coversheet, outdir=None, debug=False):
         self.coversheet = coversheet
         self.runnum = None
         self.fields = None
         self.data = []
         self.outdir = None
         self.outfile = None
+        self.debug = debug
 
         try:
             self._parse_coversheet()
@@ -58,8 +61,10 @@ class STAMPCoversheet():
                 if d.get('Name') and d.get('barcode'):
                     self.data.append(d)
             elif 'Name' in cells and 'lab#' in cells and 'mrn#' in cells:
+                # column names
                 self.fields = cells
             else: 
+                # possible header line with run# info
                 line = "\t".join([str(c) for c in cells]) + "\n"
                 m = stamprun_patt.search(line)
                 if m:
@@ -67,7 +72,7 @@ class STAMPCoversheet():
                     if m.group(2) and len(m.group(2))<5:
                         self.runnum += m.group(2)
 
-    def format_sample2barcode(self, debug=False):
+    def format_sample2barcode(self):
         self.sample2barcode = []
         samples_seen = {}
         for d in self.data:
@@ -118,7 +123,7 @@ class STAMPCoversheet():
                 sample += '-{}'.format(samples_seen[sample])
             samples_seen[sample] = 1
             self.sample2barcode.append("{}\t{}".format(sample, barcode))
-            if debug:
+            if self.debug:
                 print "{:50s}\t{:30s}\t{}".format(sample, name, d['Name'])
                 sys.stdout.flush()
         return self.sample2barcode
@@ -191,7 +196,7 @@ class StampFrame(wx.Frame):
     def __init__(self, args):
         self.args = args
         wx.Frame.__init__(self, None, size=(550,500),
-                          title="make_sample2barcode v"+VERSION, )
+                          title="{} v{}".format(PROGRAM,VERSION))
 
         panel = wx.Panel(self)
         label = wx.StaticText(panel, -1, "Drop STAMP coversheets here:")
@@ -257,16 +262,17 @@ class FileDropProcessing(wx.FileDropTarget):
 
     def OnDropFiles(self, x, y, coversheets):
         coversheet_data = []
+        num = 0
         for coversheet in coversheets:
-            s2bdata = STAMPCoversheet(coversheet)
+            s2bdata = STAMPCoversheet(coversheet, debug=self.args.debug)
             if s2bdata.fields:
                 coversheet_data.append(s2bdata)
             else:
                 self.WriteFormattedText(normaltext="Not a recognized input file:  {}".\
                     format(os.path.basename(coversheet)))
                 sys.stderr.write("  WARNING: Unrecognized format {}\n".format(coversheet))
-        for i, s2bdata in enumerate(coversheet_data):
-            label = " {}".format(i+1) if len(coversheet_data)>1 else ''
+            num += 1
+            label = " {}".format(num) if len(coversheets)>1 else ''
             self.WriteFormattedText("\nCoversheet{}: ".format(label), 
                                     os.path.basename(coversheet))
             sys.stdout.write("\nCoversheet {}\n".format(coversheet))
@@ -303,7 +309,8 @@ if __name__=='__main__':
     else:
         for coversheet in args.coversheets:
             sys.stdout.write("\nCoversheet {}\n".format(coversheet))
-            s2bdata = STAMPCoversheet(coversheet, outdir=args.outdir)
+            s2bdata = STAMPCoversheet(coversheet, outdir=args.outdir,
+                                      debug=args.debug)
             if not s2bdata.fields:
                 sys.stderr.write("  WARNING: Unrecognized format {}\n".\
                 format(coversheet))
